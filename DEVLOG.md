@@ -1,5 +1,17 @@
 # Dev Log
 
+## 2026-07-22 (사운드 연결, 금속 타일, 낙하 속도, 단어 품질 팝업)
+
+계획 파일: `~/.claude/plans/linked-marinating-glacier.md`
+
+- **사운드 10종 연결**: 사용자가 ElevenLabs로 만든 `sfx_tile_select_1~3`(랜덤 재생)/`sfx_tile_slide`/`sfx_tile_land`/`sfx_ok`/`sfx_good`/`sfx_great`/`sfx_excellent`/`sfx_fantastic`을 `preload()`에 로딩하고 각 시점에 연결. 안전하게 재생하는 `playSfx()` 헬퍼를 만들어 파일이 없거나 로드 실패해도 게임이 죽지 않도록 함(`this.cache.audio.exists()` 체크).
+- **볼륨/음소거**: `SFX_VOLUME=0.4`로 전체 음량을 낮게 고정. HUD 우측에 🔊/🔇 토글 버튼 추가, 상태는 `localStorage`(`bookworm_muted`)에 저장돼 다음 방문에도 유지. HUD 박스 폭을 살짝 줄여서 버튼 공간 확보.
+- **금속 타일 교체**: 사용자가 미드저니로 만든 브러시드 스틸 타일(`tile_normal.png`)을 배경 제거+크롭해서 반영 (기존 산호 타일처럼 자동 크롭이 잘 됨). 이 과정에서 원래 있던 오래된 sandstone 원본은 `assets/originals/tile_normal.png`에 이미 백업되어 있었고, 새 raw 이미지는 `assets/originals/tile_normal_metal_raw.png`로 별도 보관.
+- **타일 글자 대비 개선**: 금속(밝은 회색) 배경에서 기존 흰색 글씨가 잘 안 보인다는 지적으로, 골드색(`#ffcc00`) + 검정 테두리 5px로 변경(기존 흰색+3px에서 강화) — 밝은/어두운 타일 모두에서 대비가 잘 되는 색.
+- **낙하 속도 완화**: `animateTileFall()`의 duration 공식을 `140+distance*1.1`(상한650) → `200+distance*1.6`(상한900)로 늘려서 더 천천히 떨어지게 함.
+- **타일 완전 밀착 + 마찰 스파크**: `tileGap` 0, `tileDisplaySize` 50으로 재조정(완전히 맞닿음). 낙하 시작 시 Phaser 3.60 파티클 API(`this.add.particles(...).explode()`)로 작은 노란 스파크 버스트를 재생해 "타일이 마찰하며 스파크가 튄다"는 요청 반영.
+- **단어 품질 팝업 추가**: 3~7+글자에 따라 "OK → Good → Great! → Excellent!! → Fantastic!!!"를 크기(22→46px)/색상/사운드/이펙트(스파클, 화면 흔들림)가 점점 강해지도록 표시. Google Fonts "Luckiest Guy"(통통 튀는 코믹 디스플레이 폰트)를 로드해서 기존의 밋밋한 sans-serif 대신 사용. `WORD_QUALITY_TIERS` 테이블 하나로 라벨/크기/색/사운드/연출을 관리.
+
 ## 2026-07-22 (GitHub Pages 배포)
 
 - **정적 호스팅으로 전환**: 다른 스마트폰(안드로이드)에서도 Termux 없이 접속할 수 있도록, 이 프로젝트를 처음으로 git 저장소로 초기화하고 GitHub(`https://github.com/travelerphs-del/wordgame`)에 푸시. 저장소는 Public이며 로컬 커밋 작성자는 이 저장소에만 로컬로(`git config`, `--global` 아님) `travelerphs-del`/`traveler.phs@gmail.com`으로 설정.
