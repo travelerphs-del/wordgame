@@ -1,0 +1,6 @@
+# 로컬 개발 환경 설정 (SFTP 접속 정보, Claude Code 설정 등) - 공개 저장소에 불필요
+.vscode/
+.claude/
+
+# 타일 크롭 전 원본 백업 (게임에서 실제로 쓰이지 않음, 용량만 큼)
+assets/originals/
