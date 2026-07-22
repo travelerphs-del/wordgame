@@ -1,5 +1,10 @@
 # Dev Log
 
+## 2026-07-22 (슬라이드/착지음 타이밍 수정)
+
+- **슬라이드음이 착지 후에도 계속 들리던 버그 수정**: `sfx_tile_slide.mp3`가 실제로 4.03초짜리 클립인데, 타일은 0.2~1.3초만 떨어지다 보니 타일마다 재생한 소리가 착지(`sfx_tile_land`, 2.59초) 이후에도 한참 겹쳐 울렸음(`mutagen`으로 실제 길이 확인). 타일마다 개별 재생하던 걸 배치(낙하 묶음) 전체에 슬라이드음 하나만 재생하도록 바꾸고, 마지막 타일이 착지하는 순간(`onTileLanded`, 착지음과 같은 타이밍) 120ms 페이드아웃하며 강제로 끊도록 수정 (`startSlideSound`/`stopSlideSound`).
+- **낙하 속도 추가 완화**: `animateTileFall()` duration을 `200+distance*1.6`(상한900) → `280+distance*2.2`(상한1300)로 더 늘림.
+
 ## 2026-07-22 (사운드 연결, 금속 타일, 낙하 속도, 단어 품질 팝업)
 
 계획 파일: `~/.claude/plans/linked-marinating-glacier.md`
