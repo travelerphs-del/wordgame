@@ -1,5 +1,12 @@
 # Dev Log
 
+## 2026-07-22 (GitHub Pages 배포)
+
+- **정적 호스팅으로 전환**: 다른 스마트폰(안드로이드)에서도 Termux 없이 접속할 수 있도록, 이 프로젝트를 처음으로 git 저장소로 초기화하고 GitHub(`https://github.com/travelerphs-del/wordgame`)에 푸시. 저장소는 Public이며 로컬 커밋 작성자는 이 저장소에만 로컬로(`git config`, `--global` 아님) `travelerphs-del`/`traveler.phs@gmail.com`으로 설정.
+- `.gitignore` 추가: `.vscode/`(SFTP 접속 정보 등 로컬 개발 설정), `.claude/`, `assets/originals/`(크롭 전 백업, 게임에서 미사용) 제외.
+- GitHub Pages 활성화는 저장소 Settings에서 수동으로 진행 필요(웹 UI 클릭이라 자동화 불가) — 완료되면 `https://travelerphs-del.github.io/wordgame/`에서 서버/Termux 없이 어떤 기기에서든 접속 가능해짐.
+- 이제부터는 로컬 Termux SFTP 동기화와 별개로, 배포하려면 `git add`/`commit`/`push`로 GitHub에 반영해야 함 (Termux는 계속 기존 방식대로 별도 동기화).
+
 ## 2026-07-22 (3차: 레벨 리밸런스, 진행도 바, 타일 밀착, 사운드 준비)
 
 계획 파일: `~/.claude/plans/linked-marinating-glacier.md` (plan mode로 사전 승인받고 진행)
