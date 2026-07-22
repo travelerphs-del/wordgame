@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Deep Sea Word Puzzle - Dolphin Edition</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
   <style>
     body { margin: 0; padding: 0; background-color: #05131d; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
@@ -118,6 +121,19 @@ const SEED_WORDS = [
   'WHALE','CORAL','PEARL','OCEAN','TIDE','REEF','KELP','SHELL','SQUID','EEL'
 ];
 
+// 오디오
+const SFX_VOLUME = 0.4;
+const MUTE_STORAGE_KEY = 'bookworm_muted';
+
+// 단어 길이별 "품질" 팝업 (라벨/크기/사운드/연출강도)
+const WORD_QUALITY_TIERS = {
+  3: { label: 'OK',           fontSize: 22, color: '#e0f7fa', sfx: 'sfx_ok',         sparkle: false, shake: false },
+  4: { label: 'Good',         fontSize: 28, color: '#7dffd0', sfx: 'sfx_good',       sparkle: false, shake: false },
+  5: { label: 'Great!',       fontSize: 34, color: '#5be8ff', sfx: 'sfx_great',      sparkle: false, shake: false },
+  6: { label: 'Excellent!!',  fontSize: 40, color: '#ffd700', sfx: 'sfx_excellent',  sparkle: true,  shake: false },
+  7: { label: 'Fantastic!!!', fontSize: 46, color: '#ff9d4d', sfx: 'sfx_fantastic',  sparkle: true,  shake: true }
+};
+
 async function loadDictionary() {
   try {
     const response = await fetch('https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_50000.txt');
@@ -185,6 +201,25 @@ class MainScene extends Phaser.Scene {
     for (let i = 1; i <= BG_TIER_COUNT; i++) {
       this.load.image('bg_sea_' + i, `assets/bg_sea_${i}.png`);
     }
+
+    // 사운드
+    this.load.audio('sfx_tile_select_1', 'assets/sfx_tile_select_1.mp3');
+    this.load.audio('sfx_tile_select_2', 'assets/sfx_tile_select_2.mp3');
+    this.load.audio('sfx_tile_select_3', 'assets/sfx_tile_select_3.mp3');
+    this.load.audio('sfx_tile_slide', 'assets/sfx_tile_slide.mp3');
+    this.load.audio('sfx_tile_land', 'assets/sfx_tile_land.mp3');
+    this.load.audio('sfx_ok', 'assets/sfx_ok.mp3');
+    this.load.audio('sfx_good', 'assets/sfx_good.mp3');
+    this.load.audio('sfx_great', 'assets/sfx_great.mp3');
+    this.load.audio('sfx_excellent', 'assets/sfx_excellent.mp3');
+    this.load.audio('sfx_fantastic', 'assets/sfx_fantastic.mp3');
+  }
+
+  // 로드된 사운드만 안전하게 재생 (파일이 아직 없어도 게임이 죽지 않도록)
+  playSfx(key, config) {
+    if (this.cache.audio.exists(key)) {
+      this.sound.play(key, Object.assign({ volume: SFX_VOLUME }, config));
+    }
   }
 
   createFallbackTextures() {
@@ -195,6 +230,28 @@ class MainScene extends Phaser.Scene {
     g.strokeRoundedRect(0, 0, 50, 50, 8);
     g.generateTexture('fallback_tile', 50, 50);
     g.destroy();
+
+    // 타일 마찰 스파크용 작은 원형 텍스처
+    let s = this.add.graphics();
+    s.fillStyle(0xffe066, 1);
+    s.fillCircle(4, 4, 4);
+    s.generateTexture('spark_particle', 8, 8);
+    s.destroy();
+  }
+
+  // 타일이 서로 스치며 미끄러질 때 튀는 작은 불꽃 (1회성 버스트)
+  spawnSparks(x, y) {
+    const emitter = this.add.particles(x, y, 'spark_particle', {
+      speed: { min: 30, max: 90 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.7, end: 0 },
+      alpha: { start: 1, end: 0 },
+      lifespan: 250,
+      quantity: 5,
+      tint: [0xfff176, 0xffd700, 0xffffff]
+    });
+    emitter.explode(5);
+    this.time.delayedCall(320, () => emitter.destroy());
   }
 
   // 레벨 10단계마다 더 깊은 바다 배경으로 전환 (1~10 티어)
@@ -229,22 +286,27 @@ class MainScene extends Phaser.Scene {
   create() {
     const GAME_WIDTH = 480;
 
-    // 1. 배경 (레벨 10단계마다 더 깊은 바다로)
+    // 저장된 음소거 상태 복원 (HUD 만들기 전에 읽어야 버튼 아이콘이 처음부터 맞게 뜸)
+    try { this.sound.mute = localStorage.getItem(MUTE_STORAGE_KEY) === '1'; } catch (e) { /* localStorage 사용 불가 시 무시 */ }
+
+    // 1. 배경 (레벨 5단계마다 더 깊은 바다로)
     this.bgTier = 0;
     this.bgImage = null;
     this.setBackgroundTier(1);
 
-    // 2. 상단 HUD (SCORE/LV, 제한시간 바, 다음 레벨까지 진행도 바 3단 구성)
+    // 2. 상단 HUD (SCORE/LV, 제한시간 바, 다음 레벨까지 진행도 바 3단 구성). 오른쪽에 음소거 버튼 공간 확보 위해 폭을 살짝 줄임
     let hudBg = this.add.graphics();
     hudBg.fillStyle(0x000000, 0.5);
-    hudBg.fillRoundedRect(15, 10, GAME_WIDTH - 30, 72, 10);
+    hudBg.fillRoundedRect(15, 10, GAME_WIDTH - 55, 72, 10);
 
     this.scoreText = this.add.text(30, 20, 'SCORE: 0', {
       font: 'bold 18px sans-serif', fill: '#ffffff', stroke: '#000000', strokeThickness: 3
     });
-    this.levelText = this.add.text(GAME_WIDTH - 30, 20, 'LV: 1', {
+    this.levelText = this.add.text(GAME_WIDTH - 55, 20, 'LV: 1', {
       font: 'bold 18px sans-serif', fill: '#ffd700', stroke: '#000000', strokeThickness: 3
     }).setOrigin(1, 0);
+
+    this.createMuteButton(GAME_WIDTH);
 
     // 3. 타이머 바
     this.timerBarBg = this.add.graphics();
@@ -574,7 +636,10 @@ class MainScene extends Phaser.Scene {
   // 점점 가속이 붙는 낙하 트윈 (거리가 멀수록 오래 걸리되, easeIn으로 갈수록 빨라지는 느낌)
   animateTileFall(tile, targetY, onComplete) {
     const distance = Math.abs(targetY - tile.image.y);
-    const duration = Math.min(650, 140 + distance * 1.1);
+    const duration = Math.min(900, 200 + distance * 1.6);
+
+    this.playSfx('sfx_tile_slide');
+    this.spawnSparks(tile.image.x, tile.image.y);
 
     this.tweens.add({
       targets: [tile.image, tile.text],
@@ -613,8 +678,9 @@ class MainScene extends Phaser.Scene {
     if (this.fallingRemaining <= 0) {
       this.isBoardBusy = false;
       this.ensureSolvable();
-      // 마지막 타일이 착지하는 "쿵" 순간 화면을 살짝 흔듦
+      // 마지막 타일이 착지하는 "쿵" 순간 화면을 살짝 흔들고 착지음 재생
       this.cameras.main.shake(160, 0.007);
+      this.playSfx('sfx_tile_land');
     }
   }
 
@@ -738,8 +804,8 @@ class MainScene extends Phaser.Scene {
 
   createBoard(gameWidth) {
     this.board = [];
-    this.tileDisplaySize = 48;
-    this.tileGap = 1;
+    this.tileDisplaySize = 50;
+    this.tileGap = 0;
     this.tileSizeWithGap = this.tileDisplaySize + this.tileGap;
 
     const boardTotalWidth = GRID_SIZE * this.tileSizeWithGap - this.tileGap;
@@ -770,7 +836,7 @@ class MainScene extends Phaser.Scene {
 
     let tileImage = this.add.image(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
     let tileText = this.add.text(x, y, finalLetter, {
-      font: 'bold 24px sans-serif', fill: '#ffffff', stroke: '#000000', strokeThickness: 3
+      font: 'bold 25px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
     }).setOrigin(0.5);
 
     let tileObj = {
@@ -889,6 +955,7 @@ class MainScene extends Phaser.Scene {
     }
 
     // 강조된 터치 피드백: 눌렀다가 원래 크기보다 살짝 크게 튕겨오르는 펀치感
+    this.playSfx('sfx_tile_select_' + (1 + Math.floor(Math.random() * 3)));
     this.tweens.killTweensOf(tile.image);
     tile.image.setDisplaySize(tile.baseSize * 0.78, tile.baseSize * 0.78);
     this.tweens.add({
@@ -1083,6 +1150,28 @@ class MainScene extends Phaser.Scene {
     // 모든 자리가 특수타일로 막혀있는 극단적인 경우는 그냥 넘어감 - 다음 리필 때 다시 시도됨
   }
 
+  // 음소거 토글 버튼 (HUD 우측). 상태는 localStorage에 저장돼서 다음 방문 때도 유지됨
+  createMuteButton(gameWidth) {
+    const x = gameWidth - 20, y = 46;
+
+    let bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.5);
+    bg.fillRoundedRect(x - 18, y - 18, 36, 36, 10);
+    bg.lineStyle(2, 0xffffff, 0.6);
+    bg.strokeRoundedRect(x - 18, y - 18, 36, 36, 10);
+
+    this.muteButtonText = this.add.text(x, y, this.sound.mute ? '🔇' : '🔊', {
+      font: '20px sans-serif'
+    }).setOrigin(0.5);
+
+    let zone = this.add.zone(x, y, 36, 36).setInteractive();
+    zone.on('pointerdown', () => {
+      this.sound.mute = !this.sound.mute;
+      this.muteButtonText.setText(this.sound.mute ? '🔇' : '🔊');
+      try { localStorage.setItem(MUTE_STORAGE_KEY, this.sound.mute ? '1' : '0'); } catch (e) { /* 저장 불가 시 무시 */ }
+    });
+  }
+
   // 돌고래 옆 말풍선 UI (단어 뜻 표시용)
   createWordBubble() {
     this.wordBubbleContainer = this.add.container(0, 0).setDepth(50).setVisible(false).setAlpha(0);
@@ -1176,6 +1265,42 @@ class MainScene extends Phaser.Scene {
     });
   }
 
+  // 단어 길이별 "품질" 팝업 (OK -> Good -> Great! -> Excellent!! -> Fantastic!!!), 뒤로 갈수록 크고 화려해짐
+  showWordQualityPopup(word, x, y) {
+    const tierKey = Math.min(7, word.length);
+    const tier = WORD_QUALITY_TIERS[tierKey];
+    if (!tier) return;
+
+    this.playSfx(tier.sfx);
+
+    const txt = this.add.text(x, y, tier.label, {
+      fontFamily: '"Luckiest Guy"', fontSize: tier.fontSize + 'px',
+      fill: tier.color, stroke: '#000000', strokeThickness: Math.max(4, Math.round(tier.fontSize / 7))
+    }).setOrigin(0.5).setScale(0.3).setAlpha(0).setDepth(60);
+
+    this.tweens.add({
+      targets: txt,
+      scale: 1,
+      alpha: 1,
+      duration: 220,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: txt,
+          y: y - 50,
+          alpha: 0,
+          duration: 700,
+          delay: 350,
+          ease: 'Power1',
+          onComplete: () => txt.destroy()
+        });
+      }
+    });
+
+    if (tier.sparkle) this.spawnSparks(x, y);
+    if (tier.shake) this.cameras.main.shake(140, 0.006);
+  }
+
   submitWord() {
     if (this.isPaused || this.isGameOver || this.isBoardBusy) return;
 
@@ -1209,6 +1334,7 @@ class MainScene extends Phaser.Scene {
       const lastTile = this.selectedPath[this.selectedPath.length - 1];
       this.showFloatingText(lastTile.image.x, lastTile.image.y, `+${addedScore} (${word})`, '#00ffff');
       this.showWordMeaning(word);
+      this.showWordQualityPopup(word, 240, 260);
 
       // 2. 라바/소용돌이를 시간 안에 썼으면 위험 상태 소화 (뱃지/추적목록 정리)
       extinguished.forEach(t => {
