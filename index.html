@@ -360,6 +360,7 @@ class MainScene extends Phaser.Scene {
     this.wordBubbleRequestId = 0;
     this.wordBubbleHideTimer = null;
     this.levelUpAutoCloseTimer = null;
+    this.slideSoundInstance = null;
 
     // 6. 보드 및 하단 컨트롤
     this.createBoard(GAME_WIDTH);
@@ -493,6 +494,9 @@ class MainScene extends Phaser.Scene {
     this.targetScore = LEVEL_BASE_INCREMENT;
     this.timeLeft = this.maxTime;
     this.bonusGiven = { gem: false, pearl: false, coral: false, bomb: false };
+
+    // 낙하 중이었을 수 있는 슬라이드음은 즉시 정지 (페이드 없이)
+    if (this.slideSoundInstance) { this.slideSoundInstance.stop(); this.slideSoundInstance = null; }
 
     // 위험 타일 추적/뱃지 정리
     this.dangerTiles.forEach(d => {
@@ -630,15 +634,38 @@ class MainScene extends Phaser.Scene {
 
     if (this.fallingRemaining === 0) {
       this.isBoardBusy = false;
+    } else {
+      this.startSlideSound();
     }
+  }
+
+  // 낙하 배치 전체에 대해 슬라이드음을 딱 1개만 재생 (타일마다 재생하면 4초짜리 클립이 겹쳐 계속 울림)
+  startSlideSound() {
+    this.stopSlideSound();
+    if (this.cache.audio.exists('sfx_tile_slide')) {
+      this.slideSoundInstance = this.sound.add('sfx_tile_slide', { volume: SFX_VOLUME, loop: true });
+      this.slideSoundInstance.play();
+    }
+  }
+
+  // 착지 순간에 맞춰 슬라이드음을 짧게 페이드아웃하며 끊음
+  stopSlideSound() {
+    if (!this.slideSoundInstance) return;
+    const snd = this.slideSoundInstance;
+    this.slideSoundInstance = null;
+    this.tweens.add({
+      targets: snd,
+      volume: 0,
+      duration: 120,
+      onComplete: () => snd.stop()
+    });
   }
 
   // 점점 가속이 붙는 낙하 트윈 (거리가 멀수록 오래 걸리되, easeIn으로 갈수록 빨라지는 느낌)
   animateTileFall(tile, targetY, onComplete) {
     const distance = Math.abs(targetY - tile.image.y);
-    const duration = Math.min(900, 200 + distance * 1.6);
+    const duration = Math.min(1300, 280 + distance * 2.2);
 
-    this.playSfx('sfx_tile_slide');
     this.spawnSparks(tile.image.x, tile.image.y);
 
     this.tweens.add({
@@ -678,7 +705,8 @@ class MainScene extends Phaser.Scene {
     if (this.fallingRemaining <= 0) {
       this.isBoardBusy = false;
       this.ensureSolvable();
-      // 마지막 타일이 착지하는 "쿵" 순간 화면을 살짝 흔들고 착지음 재생
+      // 마지막 타일이 착지하는 "쿵" 순간: 슬라이드음은 끊고, 화면을 살짝 흔들며 착지음 재생
+      this.stopSlideSound();
       this.cameras.main.shake(160, 0.007);
       this.playSfx('sfx_tile_land');
     }
