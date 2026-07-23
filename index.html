@@ -294,6 +294,7 @@ class MainScene extends Phaser.Scene {
       frequency: 40,
       tint: [0xfff176, 0xffd700, 0xffffff]
     });
+    emitter.setDepth(5);
     emitter.startFollow(tile.image);
     this.time.delayedCall(duration, () => {
       emitter.stop();
@@ -359,7 +360,7 @@ class MainScene extends Phaser.Scene {
     // 3. 타이머 바
     this.timerBarBg = this.add.graphics();
     this.timerBarBg.fillStyle(0x222222, 0.8);
-    this.timerBarBg.fillRoundedRect(30, 45, GAME_WIDTH - 60, 8, 4);
+    this.timerBarBg.fillRoundedRect(30, 45, GAME_WIDTH - 85, 8, 4);
 
     this.timerBar = this.add.graphics();
     this.maxTime = 150;
@@ -368,7 +369,7 @@ class MainScene extends Phaser.Scene {
     // 3-1. 다음 레벨까지 남은 점수 진행도 바
     this.levelProgressBarBg = this.add.graphics();
     this.levelProgressBarBg.fillStyle(0x222222, 0.8);
-    this.levelProgressBarBg.fillRoundedRect(30, 60, GAME_WIDTH - 60, 6, 3);
+    this.levelProgressBarBg.fillRoundedRect(30, 60, GAME_WIDTH - 85, 6, 3);
 
     this.levelProgressBar = this.add.graphics();
 
@@ -804,7 +805,7 @@ class MainScene extends Phaser.Scene {
   updateTimerBar(gameWidth) {
     this.timerBar.clear();
     const pct = Math.max(0, this.timeLeft / this.maxTime);
-    const barWidth = (gameWidth - 60) * pct;
+    const barWidth = (gameWidth - 85) * pct;
     const color = pct < 0.3 ? 0xe74c3c : 0x2ecc71;
 
     this.timerBar.fillStyle(color, 1);
@@ -818,7 +819,7 @@ class MainScene extends Phaser.Scene {
     const pct = this.level >= LEVEL_CAP
       ? 1
       : Math.max(0, Math.min(1, (this.score - segStart) / this.levelIncrement));
-    const barWidth = (gameWidth - 60) * pct;
+    const barWidth = (gameWidth - 85) * pct;
 
     this.levelProgressBar.fillStyle(0xffd700, 1);
     this.levelProgressBar.fillRoundedRect(30, 60, barWidth, 6, 3);
