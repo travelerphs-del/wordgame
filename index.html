@@ -59,8 +59,8 @@
 
 <script>
 let dictionary = new Set();
-const GRID_SIZE = 9;
-// 직선(가로/세로)으로만 단어를 만들어야 하므로 모음 비율을 높이고 Y도 추가 (기존엔 Y가 아예 없었음)
+const GRID_SIZE = 8;
+// 모음 비율을 높이고 Y도 추가 (기존엔 Y가 아예 없었음)
 const LETTER_POOL = "AAAAAAAAAABBCCDDDDEEEEEEEEEEEEEFFGGHHHIIIIIIIIIJKLLLLMMNNNNNNOOOOOOOOPPQRRRRRRSSSSSSSTTTTTTTUUUUVWWXYYYZ";
 
 // 타일 종류 <-> 텍스처 매핑
@@ -83,18 +83,24 @@ const OBSTACLE_UNLOCK = [
   { level: 4, type: 'vortex' },
   { level: 5, type: 'concrete' }
 ];
-const OBSTACLE_BASE_CHANCE = 0.05;   // 첫 언락(Lv2) 시점 등장 확률
-const OBSTACLE_CHANCE_PER_LEVEL = 0.02;
-const OBSTACLE_CHANCE_CAP = 0.30;
-const CONCRETE_MAX_ON_BOARD = 2;     // 콘크리트 동시 존재 개수 상한
-const CONCRETE_WEIGHT = 0.5;         // 다른 방해타일 대비 콘크리트 가중치 (더 희귀하게)
+const CONCRETE_WEIGHT = 0.5; // 다른 방해타일 대비 콘크리트 가중치 (더 희귀하게)
 
-const DANGER_DURATION_MS = { lava: 9000, vortex: 9000 };
+// 방해타일은 더 이상 확률로 랜덤 등장하지 않고, 5레벨 구간마다 목표 개수를 정해서 부족하면 채워 넣음
+// 5~9:4개, 10~14:6개, 15~19:8개 ... 구간마다 +2
+const OBSTACLE_TARGET_LEVEL_SPAN = 5;
+const OBSTACLE_TARGET_BASE = 4;
+const OBSTACLE_TARGET_STEP = 2;
+function obstacleTargetForLevel(level) {
+  if (level < OBSTACLE_TARGET_LEVEL_SPAN) return 0;
+  return OBSTACLE_TARGET_BASE + OBSTACLE_TARGET_STEP * Math.floor((level - OBSTACLE_TARGET_LEVEL_SPAN) / OBSTACLE_TARGET_LEVEL_SPAN);
+}
+
+const DANGER_DURATION_MS = { lava: 15000 };
 const LAVA_PENALTY_SECONDS = 5;
 const LAVA_BONUS_SCORE = 150;
-const VORTEX_SCRAMBLE_COUNT = 4;
+const VORTEX_WANDER_INTERVAL_MS = 10000; // 소용돌이가 몇 초마다 인접 칸으로 이동하는지
 
-// 보너스타일: 레벨과 무관하게 해당 글자수 단어를 "처음" 완성했을 때 딱 1개씩만 지급
+// 보너스타일: 레벨과 무관하게 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
 const BONUS_MILESTONES = [
   { length: 4, type: 'gem' },
   { length: 5, type: 'pearl' },
@@ -109,9 +115,14 @@ const CORAL_TIME_BONUS_SECONDS = 6; // 힌트 폐지로 산호 효과를 시간 
 const LEVEL_BASE_INCREMENT = 800;
 const LEVEL_INCREMENT_MULTIPLIER = 1.2;
 const LEVEL_CAP = 50;
-const LEVEL_UP_AUTO_CLOSE_MS = 2000;
 const BG_TIER_LEVEL_SPAN = 5; // 배경이 몇 레벨마다 바뀌는지
 const BG_TIER_COUNT = 10;
+
+// 플레이 로그를 구글 폼으로 전송 (사용자가 폼 생성 후 아래 값을 채워야 실제로 전송됨)
+const GOOGLE_FORM_CONFIG = {
+  actionUrl: '', // 예: https://docs.google.com/forms/d/e/xxxxx/formResponse
+  fields: { name: '', level: '', score: '', duration: '' } // 각각 entry.숫자
+};
 
 // 보드가 항상 풀이 가능하도록 보장하는 안전장치용 시드 단어 (쉽고 흔한 단어 위주)
 const SEED_WORDS = [
@@ -168,6 +179,21 @@ function saveHighScore(name, score) {
     localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(top));
   } catch (e) { /* localStorage 사용 불가 시 순위 저장은 생략 */ }
   return top;
+}
+
+// 게임 종료 시 플레이 로그를 구글 폼으로 전송 (개선 참고용). actionUrl이 비어있으면 조용히 건너뜀
+function submitPlayLog(name, level, score, sessionStartTime) {
+  if (!GOOGLE_FORM_CONFIG.actionUrl) return;
+
+  const durationSeconds = Math.round((Date.now() - sessionStartTime) / 1000);
+  const body = new URLSearchParams();
+  body.append(GOOGLE_FORM_CONFIG.fields.name, name);
+  body.append(GOOGLE_FORM_CONFIG.fields.level, String(level));
+  body.append(GOOGLE_FORM_CONFIG.fields.score, String(score));
+  body.append(GOOGLE_FORM_CONFIG.fields.duration, String(durationSeconds));
+
+  fetch(GOOGLE_FORM_CONFIG.actionUrl, { method: 'POST', mode: 'no-cors', body })
+    .catch(() => { /* 실패해도 게임에는 영향 없음 */ });
 }
 
 function escapeHtml(str) {
@@ -254,6 +280,27 @@ class MainScene extends Phaser.Scene {
     this.time.delayedCall(320, () => emitter.destroy());
   }
 
+  // 타일이 완전히 밀착한 채로 낙하하는 동안 좌우 가장자리에서 계속 스파크가 튀도록 함 (타일을 따라다니는 지속 방출)
+  startFrictionSparks(tile, duration) {
+    const half = tile.baseSize / 2;
+    const emitter = this.add.particles(tile.image.x, tile.image.y, 'spark_particle', {
+      x: { min: -half, max: half },
+      y: 0,
+      speed: { min: 15, max: 50 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.5, end: 0 },
+      alpha: { start: 1, end: 0 },
+      lifespan: 200,
+      frequency: 40,
+      tint: [0xfff176, 0xffd700, 0xffffff]
+    });
+    emitter.startFollow(tile.image);
+    this.time.delayedCall(duration, () => {
+      emitter.stop();
+      this.time.delayedCall(300, () => emitter.destroy());
+    });
+  }
+
   // 레벨 10단계마다 더 깊은 바다 배경으로 전환 (1~10 티어)
   setBackgroundTier(tier) {
     tier = Math.max(1, Math.min(BG_TIER_COUNT, tier));
@@ -307,6 +354,7 @@ class MainScene extends Phaser.Scene {
     }).setOrigin(1, 0);
 
     this.createMuteButton(GAME_WIDTH);
+    this.createRulesButton(GAME_WIDTH);
 
     // 3. 타이머 바
     this.timerBarBg = this.add.graphics();
@@ -347,7 +395,6 @@ class MainScene extends Phaser.Scene {
     }).setOrigin(0.5);
 
     this.selectedPath = [];
-    this.lineDir = null;
     this.score = 0;
     this.level = 1;
     this.levelIncrement = LEVEL_BASE_INCREMENT;
@@ -356,20 +403,23 @@ class MainScene extends Phaser.Scene {
     this.isGameOver = false;
     this.isBoardBusy = false;
     this.dangerTiles = [];
-    this.bonusGiven = { gem: false, pearl: false, coral: false, bomb: false };
+    this.iceTiles = [];
+    this.wanderingVortexTiles = [];
     this.wordBubbleRequestId = 0;
     this.wordBubbleHideTimer = null;
-    this.levelUpAutoCloseTimer = null;
     this.slideSoundInstance = null;
+    this.sessionStartTime = Date.now();
 
     // 6. 보드 및 하단 컨트롤
     this.createBoard(GAME_WIDTH);
     this.ensureSolvable();
+    this.ensureObstacleDensity();
     this.createControls(GAME_WIDTH);
     this.createWordBubble();
 
     // 7. 해양 테마 통합 팝업 UI
     this.createPopupUI(GAME_WIDTH);
+    this.createRulesPopup(GAME_WIDTH);
 
     // 8. 타이머 이벤트
     this.time.addEvent({
@@ -438,7 +488,6 @@ class MainScene extends Phaser.Scene {
       if (this.isGameOver) {
         this.restartGame();
       } else {
-        if (this.levelUpAutoCloseTimer) { this.levelUpAutoCloseTimer.remove(false); this.levelUpAutoCloseTimer = null; }
         this.popupContainer.setVisible(false);
         this.isPaused = false;
       }
@@ -446,23 +495,34 @@ class MainScene extends Phaser.Scene {
     this.popupContainer.add(popupBtn);
   }
 
+  // 레벨업은 더 이상 팝업으로 막지 않고, 화면 중앙에 큰 글자가 1초간 반짝였다 사라짐 (게임은 끊기지 않고 계속 진행)
   showLevelUpPopup(newLevel) {
-    this.isPaused = true;
     this.timeLeft = this.maxTime;
     this.updateTimerBar(480);
     this.setBackgroundTier(Math.min(BG_TIER_COUNT, Math.floor((newLevel - 1) / BG_TIER_LEVEL_SPAN) + 1));
-    this.popupTitle.setText(`LEVEL ${newLevel}!`).setFill('#00ffff');
-    this.popupDesc.setText(`깊은 바닷속 레벨 ${newLevel}에 도달했습니다!\n제한시간이 회복됩니다.`);
-    this.popupBtnText.setText('다음 레벨');
-    this.popupContainer.setVisible(true);
 
-    // 2초 후 자동으로 닫히도록 (버튼을 눌러 더 일찍 닫을 수도 있음)
-    if (this.levelUpAutoCloseTimer) { this.levelUpAutoCloseTimer.remove(false); this.levelUpAutoCloseTimer = null; }
-    this.levelUpAutoCloseTimer = this.time.delayedCall(LEVEL_UP_AUTO_CLOSE_MS, () => {
-      this.levelUpAutoCloseTimer = null;
-      if (!this.isGameOver && this.isPaused) {
-        this.popupContainer.setVisible(false);
-        this.isPaused = false;
+    if (this.levelFlashText) { this.tweens.killTweensOf(this.levelFlashText); this.levelFlashText.destroy(); }
+
+    const txt = this.add.text(240, 380, `LEVEL ${newLevel}!`, {
+      fontFamily: '"Luckiest Guy"', fontSize: '56px',
+      fill: '#00ffff', stroke: '#000000', strokeThickness: 8
+    }).setOrigin(0.5).setDepth(70).setScale(0.4).setAlpha(0);
+    this.levelFlashText = txt;
+
+    this.tweens.add({
+      targets: txt,
+      scale: 1,
+      alpha: 1,
+      duration: 200,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: txt,
+          alpha: 0,
+          duration: 300,
+          delay: 500,
+          onComplete: () => { txt.destroy(); if (this.levelFlashText === txt) this.levelFlashText = null; }
+        });
       }
     });
   }
@@ -482,6 +542,8 @@ class MainScene extends Phaser.Scene {
     );
     this.popupBtnText.setText('다시 시작');
     this.popupContainer.setVisible(true);
+
+    submitPlayLog(PLAYER_NAME, this.level, this.score, this.sessionStartTime);
   }
 
   restartGame() {
@@ -493,21 +555,23 @@ class MainScene extends Phaser.Scene {
     this.levelIncrement = LEVEL_BASE_INCREMENT;
     this.targetScore = LEVEL_BASE_INCREMENT;
     this.timeLeft = this.maxTime;
-    this.bonusGiven = { gem: false, pearl: false, coral: false, bomb: false };
+    this.sessionStartTime = Date.now();
 
     // 낙하 중이었을 수 있는 슬라이드음은 즉시 정지 (페이드 없이)
     if (this.slideSoundInstance) { this.slideSoundInstance.stop(); this.slideSoundInstance = null; }
 
-    // 위험 타일 추적/뱃지 정리
+    // 위험/얼음/소용돌이 타일 추적·뱃지 정리 (rebuildBoard가 전부 normal로 되돌리므로 추적 목록도 비움)
     this.dangerTiles.forEach(d => {
       this.tweens.killTweensOf(d.tile.image);
       if (d.tile.dangerBadge) d.tile.dangerBadge.destroy();
     });
     this.dangerTiles = [];
+    this.iceTiles = [];
+    this.wanderingVortexTiles = [];
 
     this.hideWordBubble();
 
-    if (this.levelUpAutoCloseTimer) { this.levelUpAutoCloseTimer.remove(false); this.levelUpAutoCloseTimer = null; }
+    if (this.levelFlashText) { this.tweens.killTweensOf(this.levelFlashText); this.levelFlashText.destroy(); this.levelFlashText = null; }
 
     this.scoreText.setText('SCORE: 0');
     this.levelText.setText('LV: 1');
@@ -520,6 +584,7 @@ class MainScene extends Phaser.Scene {
     // 보드판 재생성 (혹시 낙하 애니메이션 도중이었다면 정지 후 제자리로 복구)
     this.rebuildBoard();
     this.ensureSolvable();
+    this.ensureObstacleDensity();
   }
 
   rebuildBoard() {
@@ -535,7 +600,6 @@ class MainScene extends Phaser.Scene {
         tileObj.text.setPosition(x, y).setScale(1).setAlpha(1);
 
         tileObj.type = 'normal';
-        tileObj.cracked = false;
         if (tileObj.dangerBadge) { tileObj.dangerBadge.destroy(); tileObj.dangerBadge = null; }
 
         tileObj.letter = LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
@@ -550,12 +614,28 @@ class MainScene extends Phaser.Scene {
     this.isBoardBusy = true;
 
     const removedSet = new Set(tiles);
-    // 폭발 등으로 함께 사라지는 위험 타일도 추적 목록/뱃지에서 정리
+    // 폭발 등으로 함께 사라지는 위험/소용돌이 타일도 추적 목록/뱃지에서 정리
     this.dangerTiles.filter(d => removedSet.has(d.tile)).forEach(d => {
       this.tweens.killTweensOf(d.tile.image);
       if (d.tile.dangerBadge) d.tile.dangerBadge.destroy();
     });
     this.dangerTiles = this.dangerTiles.filter(d => !removedSet.has(d.tile));
+    this.wanderingVortexTiles = this.wanderingVortexTiles.filter(entry => !removedSet.has(entry.tile));
+
+    // 방금 제거되는 타일들 주변 8칸에 얼음이 있으면 깨짐 처리 (얼음은 스스로 선택할 수 없고, 주변이 깨져야 풀림)
+    const brokenIce = new Set();
+    tiles.forEach(t => {
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = t.r + dr, nc = t.c + dc;
+          if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) continue;
+          const nt = this.board[nr][nc];
+          if (nt && nt.type === 'ice' && !removedSet.has(nt)) brokenIce.add(nt);
+        }
+      }
+    });
+    brokenIce.forEach(iceTile => this.breakIceTile(iceTile));
 
     let popRemaining = tiles.length;
     if (popRemaining === 0) { this.isBoardBusy = false; return; }
@@ -577,6 +657,14 @@ class MainScene extends Phaser.Scene {
         }
       });
     });
+  }
+
+  // 주변 8칸 중 하나가 깨지면 얼음도 함께 풀려서 일반 타일이 됨
+  breakIceTile(tile) {
+    this.iceTiles = this.iceTiles.filter(t => t !== tile);
+    tile.type = 'normal';
+    tile.image.setTexture(this.tileKey);
+    this.tweens.add({ targets: [tile.image], alpha: 0.4, duration: 80, yoyo: true, repeat: 1 });
   }
 
   applyGravity(removedSet, forcedBonusType) {
@@ -666,7 +754,7 @@ class MainScene extends Phaser.Scene {
     const distance = Math.abs(targetY - tile.image.y);
     const duration = Math.min(1300, 280 + distance * 2.2);
 
-    this.spawnSparks(tile.image.x, tile.image.y);
+    this.startFrictionSparks(tile, duration);
 
     this.tweens.add({
       targets: [tile.image, tile.text],
@@ -705,6 +793,7 @@ class MainScene extends Phaser.Scene {
     if (this.fallingRemaining <= 0) {
       this.isBoardBusy = false;
       this.ensureSolvable();
+      this.ensureObstacleDensity();
       // 마지막 타일이 착지하는 "쿵" 순간: 슬라이드음은 끊고, 화면을 살짝 흔들며 착지음 재생
       this.stopSlideSound();
       this.cameras.main.shake(160, 0.007);
@@ -744,9 +833,10 @@ class MainScene extends Phaser.Scene {
     }
     this.updateTimerBar(gameWidth);
     this.tickDangerTiles();
+    this.tickWanderingVortex();
   }
 
-  // 라바/소용돌이 타일 카운트다운 처리
+  // 라바 타일 카운트다운 처리
   tickDangerTiles() {
     if (this.dangerTiles.length === 0) return;
     const expired = [];
@@ -760,7 +850,7 @@ class MainScene extends Phaser.Scene {
     expired.forEach(entry => this.resolveDangerExpiry(entry));
   }
 
-  // 위험 타일 등록: 카운트다운 뱃지 + 은은한 경고 펄스
+  // 위험(라바) 타일 등록: 카운트다운 뱃지 + 은은한 경고 펄스
   registerDangerTile(tile) {
     const duration = DANGER_DURATION_MS[tile.type];
     if (!duration) return;
@@ -783,7 +873,7 @@ class MainScene extends Phaser.Scene {
     });
   }
 
-  // 위험 타일이 시간 안에 사용되지 못하고 터졌을 때 처리
+  // 라바가 시간 안에 사용되지 못하고 터졌을 때 처리
   resolveDangerExpiry(entry) {
     const tile = entry.tile;
     this.dangerTiles = this.dangerTiles.filter(d => d !== entry);
@@ -791,17 +881,12 @@ class MainScene extends Phaser.Scene {
     tile.image.setAlpha(1);
     if (tile.dangerBadge) { tile.dangerBadge.destroy(); tile.dangerBadge = null; }
 
-    if (tile.type === 'lava') {
-      this.timeLeft = Math.max(0, this.timeLeft - LAVA_PENALTY_SECONDS);
-      this.showFloatingText(tile.image.x, tile.image.y, `-${LAVA_PENALTY_SECONDS}s`, '#ff4d4d');
-    } else if (tile.type === 'vortex') {
-      this.scrambleNearbyTiles(tile);
-      this.showFloatingText(tile.image.x, tile.image.y, '판이 뒤섞였다!', '#c77dff');
-    }
+    this.timeLeft = Math.max(0, this.timeLeft - LAVA_PENALTY_SECONDS);
+    this.showFloatingText(tile.image.x, tile.image.y, `-${LAVA_PENALTY_SECONDS}s`, '#ff4d4d');
     this.revertTileToNormal(tile);
   }
 
-  // 위험 타일을 다 쓰거나(=소화) 만료된 후 일반 타일로 되돌림
+  // 위험 타일이 만료된 후 일반 타일로 되돌림
   revertTileToNormal(tile) {
     tile.type = 'normal';
     tile.image.setTexture(this.tileKey);
@@ -809,30 +894,66 @@ class MainScene extends Phaser.Scene {
     tile.text.setText(tile.letter);
   }
 
-  // 소용돌이 만료 시 주변 일반 타일 몇 개의 글자를 뒤섞음
-  scrambleNearbyTiles(centerTile) {
+  // 소용돌이 등록: 선택 불가 + 은은한 보라색 펄스, 일정 간격마다 인접 칸으로 이동
+  registerWanderingVortex(tile) {
+    this.wanderingVortexTiles.push({ tile, remaining: VORTEX_WANDER_INTERVAL_MS });
+    this.tweens.add({
+      targets: [tile.image],
+      alpha: 0.6,
+      duration: 500,
+      yoyo: true,
+      repeat: -1
+    });
+  }
+
+  // 소용돌이 이동 타이머 처리 (만료 없이 무한 반복)
+  tickWanderingVortex() {
+    if (this.wanderingVortexTiles.length === 0) return;
+    this.wanderingVortexTiles.forEach(entry => {
+      entry.remaining -= 100;
+      if (entry.remaining <= 0) {
+        entry.remaining = VORTEX_WANDER_INTERVAL_MS;
+        this.moveVortexToNeighbor(entry.tile);
+      }
+    });
+  }
+
+  // 소용돌이가 인접 8칸 중 콘크리트가 아닌 무작위 한 칸과 위치를 맞바꿈
+  moveVortexToNeighbor(tile) {
     const candidates = [];
     for (let dr = -1; dr <= 1; dr++) {
       for (let dc = -1; dc <= 1; dc++) {
         if (dr === 0 && dc === 0) continue;
-        const nr = centerTile.r + dr, nc = centerTile.c + dc;
-        if (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE) {
-          const t = this.board[nr][nc];
-          if (t && t.type === 'normal') candidates.push(t);
-        }
+        const nr = tile.r + dr, nc = tile.c + dc;
+        if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) continue;
+        const t = this.board[nr][nc];
+        if (t && t.type !== 'concrete') candidates.push(t);
       }
     }
-    candidates.sort(() => Math.random() - 0.5);
-    candidates.slice(0, VORTEX_SCRAMBLE_COUNT).forEach(t => {
-      t.letter = LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
-      t.text.setText(t.letter);
-      this.tweens.add({ targets: [t.image], angle: 12, duration: 90, yoyo: true, repeat: 1 });
-    });
+    if (candidates.length === 0) return;
+
+    const target = candidates[Math.floor(Math.random() * candidates.length)];
+    const tr = tile.r, tc = tile.c;
+    const or_ = target.r, oc = target.c;
+
+    // 보드 배열/좌표 값 교환
+    this.board[tr][tc] = target;
+    this.board[or_][oc] = tile;
+    tile.r = or_; tile.c = oc;
+    target.r = tr; target.c = tc;
+
+    const tileX = this.boardStartX + oc * this.tileSizeWithGap;
+    const tileY = this.boardStartY + or_ * this.tileSizeWithGap;
+    const targetX = this.boardStartX + tc * this.tileSizeWithGap;
+    const targetY = this.boardStartY + tr * this.tileSizeWithGap;
+
+    this.tweens.add({ targets: [tile.image, tile.text], x: tileX, y: tileY, duration: 300, ease: 'Sine.easeInOut' });
+    this.tweens.add({ targets: [target.image, target.text], x: targetX, y: targetY, duration: 300, ease: 'Sine.easeInOut' });
   }
 
   createBoard(gameWidth) {
     this.board = [];
-    this.tileDisplaySize = 50;
+    this.tileDisplaySize = 56;
     this.tileGap = 0;
     this.tileSizeWithGap = this.tileDisplaySize + this.tileGap;
 
@@ -863,43 +984,28 @@ class MainScene extends Phaser.Scene {
                         ? TILE_TEXTURE[type] : this.tileKey;
 
     let tileImage = this.add.image(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
-    let tileText = this.add.text(x, y, finalLetter, {
-      font: 'bold 25px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
+    // 콘크리트는 선택 자체가 불가능해서 글자를 보여주면 오히려 혼란스러우므로 표시하지 않음
+    let tileText = this.add.text(x, y, type === 'concrete' ? '' : finalLetter, {
+      font: 'bold 28px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
     }).setOrigin(0.5);
 
     let tileObj = {
       r, c, letter: finalLetter, image: tileImage, text: tileText, type,
-      baseSize: this.tileDisplaySize, cracked: false, dangerBadge: null
+      baseSize: this.tileDisplaySize, dangerBadge: null
     };
 
     tileImage.on('pointerdown', () => this.handleTileClick(tileObj));
 
-    if (type === 'lava' || type === 'vortex') this.registerDangerTile(tileObj);
+    if (type === 'lava') this.registerDangerTile(tileObj);
+    else if (type === 'vortex') this.registerWanderingVortex(tileObj);
+    else if (type === 'ice') this.iceTiles.push(tileObj);
 
     return tileObj;
   }
 
-  // 이 레벨에서 새로 등장할 타일의 종류를 확률적으로 결정 (방해타일만 랜덤 등장, 보너스타일은 마일스톤으로 별도 지급)
+  // 새로 생기는 타일은 이제 항상 일반 타일 (방해타일은 ensureObstacleDensity()가 레벨 구간별로 직접 주입,
+  // 보너스타일은 마일스톤으로 지급되어 applyGravity에서 forcedBonusType으로 별도 처리됨)
   pickTileType(level) {
-    const totalChance = level < 2 ? 0 : Math.min(OBSTACLE_CHANCE_CAP, OBSTACLE_BASE_CHANCE + OBSTACLE_CHANCE_PER_LEVEL * (level - 2));
-    if (totalChance <= 0 || Math.random() >= totalChance) return 'normal';
-
-    const unlocked = OBSTACLE_UNLOCK.filter(o => level >= o.level).map(o => o.type);
-    if (unlocked.length === 0) return 'normal';
-
-    const concreteCount = this.countTilesOfType('concrete');
-    const weights = unlocked.map(t => {
-      if (t === 'concrete') return concreteCount >= CONCRETE_MAX_ON_BOARD ? 0 : CONCRETE_WEIGHT;
-      return 1;
-    });
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
-    if (totalWeight <= 0) return 'normal';
-
-    let roll = Math.random() * totalWeight;
-    for (let i = 0; i < unlocked.length; i++) {
-      roll -= weights[i];
-      if (roll <= 0) return unlocked[i];
-    }
     return 'normal';
   }
 
@@ -912,6 +1018,57 @@ class MainScene extends Phaser.Scene {
       }
     }
     return count;
+  }
+
+  // 방해타일 총 개수를 이번 레벨의 목표치까지 채움 (5~9:4개, 10~14:6개, 15~19:8개 ... 5레벨마다 +2)
+  ensureObstacleDensity() {
+    const target = obstacleTargetForLevel(this.level);
+    const obstacleTypes = ['ice', 'lava', 'vortex', 'concrete'];
+    const current = obstacleTypes.reduce((sum, t) => sum + this.countTilesOfType(t), 0);
+    if (current >= target) return;
+
+    const unlocked = OBSTACLE_UNLOCK.filter(o => this.level >= o.level).map(o => o.type);
+    if (unlocked.length === 0) return;
+
+    const normalTiles = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        if (this.board[r][c] && this.board[r][c].type === 'normal') normalTiles.push(this.board[r][c]);
+      }
+    }
+    normalTiles.sort(() => Math.random() - 0.5);
+
+    let needed = target - current;
+    for (const tile of normalTiles) {
+      if (needed <= 0) break;
+      this.convertTileToObstacle(tile, this.pickWeightedObstacleType(unlocked));
+      needed--;
+    }
+  }
+
+  // 언락된 방해타일 종류 중 가중치 기반 랜덤 선택 (콘크리트는 더 희귀하게)
+  pickWeightedObstacleType(unlocked) {
+    const weights = unlocked.map(t => t === 'concrete' ? CONCRETE_WEIGHT : 1);
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let roll = Math.random() * totalWeight;
+    for (let i = 0; i < unlocked.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) return unlocked[i];
+    }
+    return unlocked[unlocked.length - 1];
+  }
+
+  // 일반 타일을 애니메이션 없이 조용히 방해타일로 전환 (텍스처/추적목록 갱신)
+  convertTileToObstacle(tile, type) {
+    tile.type = type;
+    const textureKey = (this.textures.exists(TILE_TEXTURE[type]) && this.textures.get(TILE_TEXTURE[type]).key !== '__MISSING')
+                        ? TILE_TEXTURE[type] : this.tileKey;
+    tile.image.setTexture(textureKey);
+    if (type === 'concrete') tile.text.setText('');
+
+    if (type === 'lava') this.registerDangerTile(tile);
+    else if (type === 'vortex') this.registerWanderingVortex(tile);
+    else if (type === 'ice') this.iceTiles.push(tile);
   }
 
   createControls(gameWidth) {
@@ -966,79 +1123,45 @@ class MainScene extends Phaser.Scene {
   handleTileClick(tile) {
     if (this.isPaused || this.isGameOver || this.isBoardBusy) return;
 
-    // 콘크리트: 선택 불가 (깨지지 않음) - 흔들림으로 "안 눌린다"는 피드백만
-    if (tile.type === 'concrete') {
+    // 콘크리트/얼음/소용돌이: 항상 선택 불가 - 흔들림으로 "안 눌린다"는 피드백만
+    if (tile.type === 'concrete' || tile.type === 'ice' || tile.type === 'vortex') {
       this.tweens.killTweensOf(tile.image);
       this.tweens.add({ targets: [tile.image], angle: 6, duration: 50, yoyo: true, repeat: 3 });
       return;
     }
 
-    // 아이스: 처음 탭하면 금만 가고, 두 번째 탭부터 실제 선택됨
-    if (tile.type === 'ice' && !tile.cracked) {
-      tile.cracked = true;
-      this.tweens.killTweensOf(tile.image);
-      tile.image.setAlpha(0.8);
-      this.tweens.add({ targets: [tile.image], angle: 8, duration: 60, yoyo: true, repeat: 2 });
-      return;
-    }
-
-    // 강조된 터치 피드백: 눌렀다가 원래 크기보다 살짝 크게 튕겨오르는 펀치感
+    // 터치 피드백: 위로 살짝 튀어올랐다가 제자리로 (크기 변화 없음)
     this.playSfx('sfx_tile_select_' + (1 + Math.floor(Math.random() * 3)));
-    this.tweens.killTweensOf(tile.image);
-    tile.image.setDisplaySize(tile.baseSize * 0.78, tile.baseSize * 0.78);
+    this.tweens.killTweensOf([tile.image, tile.text]);
     this.tweens.add({
-      targets: [tile.image],
-      displaySizeX: tile.baseSize * 1.18,
-      displaySizeY: tile.baseSize * 1.18,
+      targets: [tile.image, tile.text],
+      y: '-=10',
       duration: 90,
-      ease: 'Back.easeOut',
-      onComplete: () => {
-        this.tweens.add({
-          targets: [tile.image],
-          displaySizeX: tile.baseSize,
-          displaySizeY: tile.baseSize,
-          duration: 100,
-          ease: 'Sine.easeOut'
-        });
-      }
+      ease: 'Sine.easeOut',
+      yoyo: true
     });
 
-    // 단어는 "직선"으로만 만들 수 있음: 가로/세로/대각선 8방향, 시작 방향은 무관
+    // 단어는 인접한 칸끼리 자유롭게 연결 (8방향, 몇 번이든 꺾을 수 있음)
     const index = this.selectedPath.indexOf(tile);
     if (index !== -1) {
-      // 이미 선택된 타일을 다시 클릭하면 그 지점까지 되돌림 (직선 부분집합이라 그대로 유효)
+      // 이미 선택된 타일을 다시 클릭하면 그 지점까지 되돌림
       const deselected = this.selectedPath.slice(index + 1);
       this.selectedPath = this.selectedPath.slice(0, index + 1);
       deselected.forEach(t => this.deselectTile(t));
-      if (this.selectedPath.length < 2) this.lineDir = null;
     } else if (this.selectedPath.length === 0) {
       this.selectedPath.push(tile);
       this.selectTile(tile);
-    } else if (this.selectedPath.length === 1) {
-      const first = this.selectedPath[0];
-      const dr = tile.r - first.r, dc = tile.c - first.c;
-      const isStraightNeighbor = Math.abs(dr) <= 1 && Math.abs(dc) <= 1 && !(dr === 0 && dc === 0);
-      if (isStraightNeighbor) {
-        this.lineDir = { dr, dc };
-        this.selectedPath.push(tile);
-        this.selectTile(tile);
-      } else {
-        // 직선이 안 되면 클릭한 타일부터 새로 시작
-        this.deselectTile(first);
-        this.selectedPath = [tile];
-        this.selectTile(tile);
-      }
     } else {
       const last = this.selectedPath[this.selectedPath.length - 1];
-      const expectedR = last.r + this.lineDir.dr, expectedC = last.c + this.lineDir.dc;
-      if (tile.r === expectedR && tile.c === expectedC) {
+      const dr = Math.abs(tile.r - last.r), dc = Math.abs(tile.c - last.c);
+      const isAdjacent = dr <= 1 && dc <= 1;
+      if (isAdjacent) {
         this.selectedPath.push(tile);
         this.selectTile(tile);
       } else {
-        // 직선이 끊기면 클릭한 타일부터 새로 시작
+        // 인접하지 않으면 클릭한 타일부터 새로 시작
         this.selectedPath.forEach(t => this.deselectTile(t));
         this.selectedPath = [tile];
-        this.lineDir = null;
         this.selectTile(tile);
       }
     }
@@ -1059,7 +1182,6 @@ class MainScene extends Phaser.Scene {
   clearSelection() {
     this.selectedPath.forEach(t => this.deselectTile(t));
     this.selectedPath = [];
-    this.lineDir = null;
     this.wordText.setText('-');
   }
 
@@ -1108,7 +1230,7 @@ class MainScene extends Phaser.Scene {
         let segment = [];
         const segments = [];
         line.forEach(tile => {
-          if (tile.type === 'concrete') {
+          if (tile.type === 'concrete' || tile.type === 'ice' || tile.type === 'vortex') {
             if (segment.length) segments.push(segment);
             segment = [];
           } else {
@@ -1178,26 +1300,113 @@ class MainScene extends Phaser.Scene {
     // 모든 자리가 특수타일로 막혀있는 극단적인 경우는 그냥 넘어감 - 다음 리필 때 다시 시도됨
   }
 
-  // 음소거 토글 버튼 (HUD 우측). 상태는 localStorage에 저장돼서 다음 방문 때도 유지됨
+  // 음소거 토글 버튼 (HUD 우측 상단). 상태는 localStorage에 저장돼서 다음 방문 때도 유지됨
   createMuteButton(gameWidth) {
-    const x = gameWidth - 20, y = 46;
+    const x = gameWidth - 20, y = 29;
 
     let bg = this.add.graphics();
     bg.fillStyle(0x000000, 0.5);
-    bg.fillRoundedRect(x - 18, y - 18, 36, 36, 10);
+    bg.fillRoundedRect(x - 15, y - 15, 30, 30, 9);
     bg.lineStyle(2, 0xffffff, 0.6);
-    bg.strokeRoundedRect(x - 18, y - 18, 36, 36, 10);
+    bg.strokeRoundedRect(x - 15, y - 15, 30, 30, 9);
 
     this.muteButtonText = this.add.text(x, y, this.sound.mute ? '🔇' : '🔊', {
-      font: '20px sans-serif'
+      font: '17px sans-serif'
     }).setOrigin(0.5);
 
-    let zone = this.add.zone(x, y, 36, 36).setInteractive();
+    let zone = this.add.zone(x, y, 30, 30).setInteractive();
     zone.on('pointerdown', () => {
       this.sound.mute = !this.sound.mute;
       this.muteButtonText.setText(this.sound.mute ? '🔇' : '🔊');
       try { localStorage.setItem(MUTE_STORAGE_KEY, this.sound.mute ? '1' : '0'); } catch (e) { /* 저장 불가 시 무시 */ }
     });
+  }
+
+  // 게임 규칙 버튼 (음소거 버튼 바로 아래). 클릭하면 간단한 규칙 설명 오버레이를 띄움
+  createRulesButton(gameWidth) {
+    const x = gameWidth - 20, y = 63;
+
+    let bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.5);
+    bg.fillRoundedRect(x - 15, y - 15, 30, 30, 9);
+    bg.lineStyle(2, 0xffffff, 0.6);
+    bg.strokeRoundedRect(x - 15, y - 15, 30, 30, 9);
+
+    this.add.text(x, y, '📖', { font: '16px sans-serif' }).setOrigin(0.5);
+
+    let zone = this.add.zone(x, y, 30, 30).setInteractive();
+    zone.on('pointerdown', () => this.showRulesPopup());
+  }
+
+  // 규칙 설명 오버레이 (기존 popupContainer와 별개, 표시 중엔 일시정지)
+  createRulesPopup(gameWidth) {
+    this.rulesContainer = this.add.container(0, 0).setDepth(90).setVisible(false);
+
+    let overlay = this.add.graphics();
+    overlay.fillStyle(0x05131d, 0.9);
+    overlay.fillRect(0, 0, gameWidth, 800);
+    this.rulesContainer.add(overlay);
+
+    let card = this.add.graphics();
+    card.fillStyle(0x0a2e38, 0.97);
+    card.fillRoundedRect(gameWidth / 2 - 175, 130, 350, 540, 16);
+    card.lineStyle(3, 0x00ffff, 0.8);
+    card.strokeRoundedRect(gameWidth / 2 - 175, 130, 350, 540, 16);
+    this.rulesContainer.add(card);
+
+    this.rulesContainer.add(
+      this.add.text(gameWidth / 2, 155, '게임 규칙', {
+        font: 'bold 24px sans-serif', fill: '#00ffff', stroke: '#000000', strokeThickness: 3
+      }).setOrigin(0.5)
+    );
+
+    const rulesText = [
+      '· 인접한 칸끼리 자유롭게 이어서(꺾어도 OK) 3글자 이상 단어를 만드세요',
+      '',
+      '💎 젬 (4글자) - 고정 보너스 점수',
+      '🐢 진주 (5글자) - 단어 점수 ×2',
+      '🪸 산호 (6글자) - 시간 +6초',
+      '💣 폭탄 (7글자+) - 주변 3×3 파괴 + 큰 보너스',
+      '',
+      '🧊 얼음 - 선택 불가, 주변 8칸이 깨지면 풀림',
+      '🔥 라바 - 15초 내 못 쓰면 시간 -5초',
+      '🌀 소용돌이 - 선택 불가, 10초마다 이동 (폭탄으로만 제거)',
+      '🧱 콘크리트 - 선택 불가, 폭탄으로만 제거',
+      '',
+      '레벨업 시 제한시간이 가득 회복됩니다'
+    ].join('\n');
+
+    this.rulesContainer.add(
+      this.add.text(gameWidth / 2, 190, rulesText, {
+        font: '14px sans-serif', fill: '#e0f7fa', align: 'left', lineSpacing: 6,
+        wordWrap: { width: 310 }
+      }).setOrigin(0.5, 0)
+    );
+
+    let closeBtn = this.add.container(gameWidth / 2, 630);
+    let closeBg = this.add.graphics();
+    closeBg.fillStyle(0x00b894, 1);
+    closeBg.fillRoundedRect(-70, -20, 140, 40, 10);
+    closeBg.lineStyle(2, 0xffffff, 0.9);
+    closeBg.strokeRoundedRect(-70, -20, 140, 40, 10);
+    closeBtn.add(closeBg);
+    closeBtn.add(this.add.text(0, 0, '닫기', { font: 'bold 16px sans-serif', fill: '#ffffff' }).setOrigin(0.5));
+
+    let closeZone = this.add.zone(0, 0, 140, 40).setInteractive();
+    closeZone.on('pointerdown', () => this.hideRulesPopup());
+    closeBtn.add(closeZone);
+    this.rulesContainer.add(closeBtn);
+  }
+
+  showRulesPopup() {
+    if (this.isGameOver || this.isBoardBusy) return;
+    this.isPaused = true;
+    this.rulesContainer.setVisible(true);
+  }
+
+  hideRulesPopup() {
+    this.rulesContainer.setVisible(false);
+    this.isPaused = false;
   }
 
   // 돌고래 옆 말풍선 UI (단어 뜻 표시용)
@@ -1349,7 +1558,6 @@ class MainScene extends Phaser.Scene {
         else if (t.type === 'coral') coralTimeGrant += CORAL_TIME_BONUS_SECONDS;
         else if (t.type === 'bomb') { flatBonus += BOMB_BONUS_SCORE; bombTiles.push(t); }
         else if (t.type === 'lava') { flatBonus += LAVA_BONUS_SCORE; extinguished.push(t); }
-        else if (t.type === 'vortex') { extinguished.push(t); }
       });
 
       const addedScore = (word.length * 100 + flatBonus) * scoreMultiplier;
@@ -1399,15 +1607,14 @@ class MainScene extends Phaser.Scene {
         this.showFloatingText(bombTiles[0].image.x, bombTiles[0].image.y, '💥 폭발!', '#ff9d4d');
       }
 
-      // 5. 4/5/6/7+ 글자 단어를 이번에 "처음" 완성했다면 보너스 타일 1개 마일스톤 지급
+      // 5. 4/5/6/7+ 글자 단어를 완성할 때마다 매번 보너스 타일 지급 (once-per-game 캡 없음)
       let pendingBonusType = null;
-      if (word.length >= 7 && !this.bonusGiven.bomb) pendingBonusType = 'bomb';
-      else if (word.length === 6 && !this.bonusGiven.coral) pendingBonusType = 'coral';
-      else if (word.length === 5 && !this.bonusGiven.pearl) pendingBonusType = 'pearl';
-      else if (word.length === 4 && !this.bonusGiven.gem) pendingBonusType = 'gem';
+      if (word.length >= 7) pendingBonusType = 'bomb';
+      else if (word.length === 6) pendingBonusType = 'coral';
+      else if (word.length === 5) pendingBonusType = 'pearl';
+      else if (word.length === 4) pendingBonusType = 'gem';
       if (pendingBonusType) {
-        this.bonusGiven[pendingBonusType] = true;
-        this.showFloatingText(240, 200, '✨ 새로운 보너스 타일 획득!', '#ffe600');
+        this.showFloatingText(240, 200, '✨ 보너스 타일 획득!', '#ffe600');
       }
 
       // 6. 레벨업 판정 (한 단어로 여러 레벨을 넘을 수도 있으므로 while로 처리, 팝업은 최종 레벨로 1회만)
