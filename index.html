@@ -102,10 +102,10 @@ const VORTEX_WANDER_INTERVAL_MS = 10000; // 소용돌이가 몇 초마다 인접
 
 // 보너스타일: 레벨과 무관하게 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
 const BONUS_MILESTONES = [
-  { length: 4, type: 'gem' },
-  { length: 5, type: 'pearl' },
-  { length: 6, type: 'coral' },
-  { length: 7, type: 'bomb' } // 7글자 이상
+  { length: 3, type: 'gem' },
+  { length: 4, type: 'pearl' },
+  { length: 5, type: 'coral' },
+  { length: 6, type: 'bomb' } // 7글자 이상은 보드 완전 리셋(별도 처리, 타일 종류 아님)
 ];
 const GEM_BONUS_SCORE = 200;
 const BOMB_BONUS_SCORE = 500;
@@ -609,6 +609,25 @@ class MainScene extends Phaser.Scene {
     }
   }
 
+  // 7글자 이상 단어 완성 보상: 보드 전체(방해타일 포함)를 새로 채움. restartGame()과 달리
+  // 점수/레벨/제한시간/배경 티어는 그대로 유지 — 재시작이 아니라 인게임 보상 효과
+  triggerFullBoardReset() {
+    this.dangerTiles.forEach(d => {
+      this.tweens.killTweensOf(d.tile.image);
+      if (d.tile.dangerBadge) d.tile.dangerBadge.destroy();
+    });
+    this.dangerTiles = [];
+    this.iceTiles = [];
+    this.wanderingVortexTiles = [];
+
+    this.rebuildBoard();
+    this.ensureSolvable();
+    this.ensureObstacleDensity();
+
+    this.cameras.main.shake(220, 0.01);
+    this.showFloatingText(240, 200, '💥 보드 완전 리셋!', '#ff9d4d');
+  }
+
   // 정답으로 제출된 타일들을 제거하고, 중력에 의해 위에서 새 타일이 떨어져 채워지도록 함
   // forcedBonusType이 있으면 이번 리필로 새로 생기는 타일 중 하나는 반드시 그 종류로 생성됨 (마일스톤 보상)
   removeAndRefill(tiles, forcedBonusType) {
@@ -893,6 +912,37 @@ class MainScene extends Phaser.Scene {
     tile.image.setTexture(this.tileKey);
     tile.letter = LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
     tile.text.setText(tile.letter);
+  }
+
+  // 10레벨마다 호출: 방해/보너스 타일은 그대로 두고, 일반 타일들의 글자만
+  // LETTER_POOL의 실제 모음/자음 비율에 맞춰 다시 뽑아 배정 (장시간 플레이로 누적된 글자 편중 보정)
+  rebalanceLetterTiles() {
+    const normalTiles = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        const t = this.board[r][c];
+        if (t && t.type === 'normal') normalTiles.push(t);
+      }
+    }
+    if (normalTiles.length === 0) return;
+
+    const isVowel = ch => 'AEIOU'.includes(ch);
+    const vowelPool = LETTER_POOL.split('').filter(isVowel);
+    const consonantPool = LETTER_POOL.split('').filter(ch => !isVowel(ch));
+    const targetVowels = Math.round(normalTiles.length * vowelPool.length / LETTER_POOL.length);
+
+    const newLetters = [];
+    for (let i = 0; i < targetVowels; i++) newLetters.push(vowelPool[Math.floor(Math.random() * vowelPool.length)]);
+    for (let i = targetVowels; i < normalTiles.length; i++) newLetters.push(consonantPool[Math.floor(Math.random() * consonantPool.length)]);
+    newLetters.sort(() => Math.random() - 0.5);
+
+    normalTiles.forEach((tile, i) => {
+      tile.letter = newLetters[i];
+      tile.text.setText(tile.letter);
+    });
+
+    this.ensureSolvable();
+    this.showFloatingText(240, 200, '🔤 글자 재배치!', '#7dffd0');
   }
 
   // 소용돌이 등록: 선택 불가 + 은은한 보라색 펄스, 일정 간격마다 인접 칸으로 이동
@@ -1364,10 +1414,11 @@ class MainScene extends Phaser.Scene {
     const rulesText = [
       '· 인접한 칸끼리 자유롭게 이어서(꺾어도 OK) 3글자 이상 단어를 만드세요',
       '',
-      '💎 젬 (4글자) - 고정 보너스 점수',
-      '🐢 진주 (5글자) - 단어 점수 ×2',
-      '🪸 산호 (6글자) - 시간 +6초',
-      '💣 폭탄 (7글자+) - 주변 3×3 파괴 + 큰 보너스',
+      '💎 젬 (3글자) - 고정 보너스 점수',
+      '🐢 진주 (4글자) - 단어 점수 ×2',
+      '🪸 산호 (5글자) - 시간 +6초',
+      '💣 폭탄 (6글자) - 주변 3×3 파괴 + 큰 보너스',
+      '💥 완전 리셋 (7글자+) - 보드 전체 새로 채움 (방해타일도 초기화)',
       '',
       '🧊 얼음 - 선택 불가, 주변 8칸이 깨지면 풀림',
       '🔥 라바 - 15초 내 못 쓰면 시간 -5초',
@@ -1608,17 +1659,20 @@ class MainScene extends Phaser.Scene {
         this.showFloatingText(bombTiles[0].image.x, bombTiles[0].image.y, '💥 폭발!', '#ff9d4d');
       }
 
-      // 5. 4/5/6/7+ 글자 단어를 완성할 때마다 매번 보너스 타일 지급 (once-per-game 캡 없음)
+      // 5. 3/4/5/6글자 단어를 완성할 때마다 매번 보너스 타일 지급, 7글자 이상은 보드 완전 리셋 (once-per-game 캡 없음)
       let pendingBonusType = null;
-      if (word.length >= 7) pendingBonusType = 'bomb';
-      else if (word.length === 6) pendingBonusType = 'coral';
-      else if (word.length === 5) pendingBonusType = 'pearl';
-      else if (word.length === 4) pendingBonusType = 'gem';
+      let triggerFullReset = false;
+      if (word.length >= 7) triggerFullReset = true;
+      else if (word.length === 6) pendingBonusType = 'bomb';
+      else if (word.length === 5) pendingBonusType = 'coral';
+      else if (word.length === 4) pendingBonusType = 'pearl';
+      else if (word.length === 3) pendingBonusType = 'gem';
       if (pendingBonusType) {
         this.showFloatingText(240, 200, '✨ 보너스 타일 획득!', '#ffe600');
       }
 
       // 6. 레벨업 판정 (한 단어로 여러 레벨을 넘을 수도 있으므로 while로 처리, 팝업은 최종 레벨로 1회만)
+      const levelBeforeUp = this.level;
       let leveledUp = false;
       while (this.level < LEVEL_CAP && this.score >= this.targetScore) {
         this.level++;
@@ -1629,13 +1683,21 @@ class MainScene extends Phaser.Scene {
       if (leveledUp) {
         this.levelText.setText(`LV: ${this.level}`);
         this.showLevelUpPopup(this.level);
+        // 10/20/30/40 레벨 경계를 넘을 때마다 일반 타일 자음/모음 비율을 다시 맞춤
+        if (Math.floor(this.level / 10) > Math.floor(levelBeforeUp / 10)) {
+          this.rebalanceLetterTiles();
+        }
       }
       this.updateLevelProgressBar(480);
 
       const matchedTiles = this.selectedPath.concat(blastExtra);
       this.selectedPath = [];
       this.wordText.setText('-');
-      this.removeAndRefill(matchedTiles, pendingBonusType);
+      if (triggerFullReset) {
+        this.triggerFullBoardReset();
+      } else {
+        this.removeAndRefill(matchedTiles, pendingBonusType);
+      }
     } else {
       this.tweens.add({
         targets: this.wordText,
