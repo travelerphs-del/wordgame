@@ -111,9 +111,9 @@ const GEM_BONUS_SCORE = 200;
 const BOMB_BONUS_SCORE = 500;
 const CORAL_TIME_BONUS_SECONDS = 6; // 힌트 폐지로 산호 효과를 시간 보너스로 변경
 
-// 레벨업 목표점수 증가폭 배수 (800 -> 950 -> 1150 -> ... 로 완만하게 가속)
+// 레벨업 목표점수 증가폭 배수 (800 -> 900 -> 1050 -> ... 로 완만하게 가속, 레벨 15+ 정체 피드백으로 1.2->1.15 완화)
 const LEVEL_BASE_INCREMENT = 800;
-const LEVEL_INCREMENT_MULTIPLIER = 1.2;
+const LEVEL_INCREMENT_MULTIPLIER = 1.15;
 const LEVEL_CAP = 50;
 const BG_TIER_LEVEL_SPAN = 5; // 배경이 몇 레벨마다 바뀌는지
 const BG_TIER_COUNT = 10;
@@ -122,6 +122,12 @@ const BG_TIER_COUNT = 10;
 const GOOGLE_FORM_CONFIG = {
   actionUrl: '', // 예: https://docs.google.com/forms/d/e/xxxxx/formResponse
   fields: { name: '', level: '', score: '', duration: '' } // 각각 entry.숫자
+};
+
+// 단어 통계용 구글 폼 (게임오버 시점에 그 판에서 만든 단어를 단어당 한 줄씩 일괄 전송)
+const WORD_FORM_CONFIG = {
+  actionUrl: '', // 사용자가 새 폼 만든 뒤 채워넣음
+  fields: { name: '', word: '', length: '', level: '', score: '' } // 각각 entry.숫자
 };
 
 // 보드가 항상 풀이 가능하도록 보장하는 안전장치용 시드 단어 (쉽고 흔한 단어 위주)
@@ -194,6 +200,22 @@ function submitPlayLog(name, level, score, sessionStartTime) {
 
   fetch(GOOGLE_FORM_CONFIG.actionUrl, { method: 'POST', mode: 'no-cors', body })
     .catch(() => { /* 실패해도 게임에는 영향 없음 */ });
+}
+
+// 그 판에서 만든 단어들을 단어당 한 줄씩 구글폼으로 일괄 전송 (게임오버 시점에 한 번에 처리)
+function submitWordLog(name, wordLog) {
+  if (!WORD_FORM_CONFIG.actionUrl) return;
+
+  wordLog.forEach(entry => {
+    const body = new URLSearchParams();
+    body.append(WORD_FORM_CONFIG.fields.name, name);
+    body.append(WORD_FORM_CONFIG.fields.word, entry.word);
+    body.append(WORD_FORM_CONFIG.fields.length, String(entry.length));
+    body.append(WORD_FORM_CONFIG.fields.level, String(entry.level));
+    body.append(WORD_FORM_CONFIG.fields.score, String(entry.score));
+    fetch(WORD_FORM_CONFIG.actionUrl, { method: 'POST', mode: 'no-cors', body })
+      .catch(() => { /* 실패해도 게임에는 영향 없음 */ });
+  });
 }
 
 function escapeHtml(str) {
@@ -363,7 +385,7 @@ class MainScene extends Phaser.Scene {
     this.timerBarBg.fillRoundedRect(30, 45, GAME_WIDTH - 85, 8, 4);
 
     this.timerBar = this.add.graphics();
-    this.maxTime = 150;
+    this.maxTime = 180;
     this.timeLeft = this.maxTime;
 
     // 3-1. 다음 레벨까지 남은 점수 진행도 바
@@ -410,6 +432,7 @@ class MainScene extends Phaser.Scene {
     this.wordBubbleHideTimer = null;
     this.slideSoundInstance = null;
     this.sessionStartTime = Date.now();
+    this.sessionWordLog = [];
 
     // 6. 보드 및 하단 컨트롤
     this.createBoard(GAME_WIDTH);
@@ -545,6 +568,7 @@ class MainScene extends Phaser.Scene {
     this.popupContainer.setVisible(true);
 
     submitPlayLog(PLAYER_NAME, this.level, this.score, this.sessionStartTime);
+    submitWordLog(PLAYER_NAME, this.sessionWordLog);
   }
 
   restartGame() {
@@ -557,6 +581,7 @@ class MainScene extends Phaser.Scene {
     this.targetScore = LEVEL_BASE_INCREMENT;
     this.timeLeft = this.maxTime;
     this.sessionStartTime = Date.now();
+    this.sessionWordLog = [];
 
     // 낙하 중이었을 수 있는 슬라이드음은 즉시 정지 (페이드 없이)
     if (this.slideSoundInstance) { this.slideSoundInstance.stop(); this.slideSoundInstance = null; }
@@ -1615,6 +1640,7 @@ class MainScene extends Phaser.Scene {
       const addedScore = (word.length * 100 + flatBonus) * scoreMultiplier;
       this.score += addedScore;
       this.scoreText.setText(`SCORE: ${this.score}`);
+      this.sessionWordLog.push({ word, length: word.length, level: this.level, score: addedScore });
 
       let bonusTime = word.length === 3 ? 2 : (word.length === 4 ? 4 : 7);
       this.timeLeft = Math.min(this.maxTime, this.timeLeft + bonusTime);
