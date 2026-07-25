@@ -142,6 +142,11 @@ const SEED_WORDS = [
 const SFX_VOLUME = 0.4;
 const MUTE_STORAGE_KEY = 'bookworm_muted';
 
+// 배경음악: 5곡 중 매 접속마다 무작위로 1곡. 파일당 2~3MB로 커서 preload()엔 넣지 않고
+// 보드가 뜬 뒤 별도로 불러옴(초기 로딩 용량에 영향 없게)
+const BGM_KEYS = ['bgm_1', 'bgm_2', 'bgm_3', 'bgm_4', 'bgm_5'];
+const BGM_VOLUME = 0.25;
+
 // 단어 길이별 "품질" 팝업 (라벨/크기/사운드/연출강도)
 const WORD_QUALITY_TIERS = {
   3: { label: 'OK',           fontSize: 22, color: '#e0f7fa', sfx: 'sfx_ok',         sparkle: false, shake: false },
@@ -247,7 +252,7 @@ class MainScene extends Phaser.Scene {
       this.load.image(TILE_TEXTURE[key], `assets/${TILE_TEXTURE[key]}.png`);
     }
     for (let i = 1; i <= BG_TIER_COUNT; i++) {
-      this.load.image('bg_sea_' + i, `assets/bg_sea_${i}.png`);
+      this.load.image('bg_sea_' + i, `assets/bg_sea_${i}.jpg`);
     }
 
     // 사운드
@@ -268,6 +273,27 @@ class MainScene extends Phaser.Scene {
     if (this.cache.audio.exists(key)) {
       this.sound.play(key, Object.assign({ volume: SFX_VOLUME }, config));
     }
+  }
+
+  // 배경음악 5곡 중 무작위 1곡을 골라 지금 불러와서(preload와 별개) 재생. 게임당 한 번만 시작
+  startBackgroundMusic() {
+    if (this.bgmStarted) return;
+    this.bgmStarted = true;
+
+    const key = BGM_KEYS[Math.floor(Math.random() * BGM_KEYS.length)];
+    if (this.cache.audio.exists(key)) {
+      this.playBackgroundMusic(key);
+      return;
+    }
+    this.load.audio(key, `assets/${key}.mp3`);
+    this.load.once(Phaser.Loader.Events.COMPLETE, () => this.playBackgroundMusic(key));
+    this.load.start();
+  }
+
+  playBackgroundMusic(key) {
+    if (!this.cache.audio.exists(key)) return;
+    this.bgmInstance = this.sound.add(key, { loop: true, volume: BGM_VOLUME });
+    this.bgmInstance.play();
   }
 
   createFallbackTextures() {
@@ -359,6 +385,9 @@ class MainScene extends Phaser.Scene {
     // 저장된 음소거 상태 복원 (HUD 만들기 전에 읽어야 버튼 아이콘이 처음부터 맞게 뜸)
     try { this.sound.mute = localStorage.getItem(MUTE_STORAGE_KEY) === '1'; } catch (e) { /* localStorage 사용 불가 시 무시 */ }
 
+    // 배경음악은 초기 로딩과 무관하게 보드가 뜬 뒤 비동기로 불러와 재생 (음소거 버튼과 자동 연동)
+    this.startBackgroundMusic();
+
     // 1. 배경 (레벨 5단계마다 더 깊은 바다로)
     this.bgTier = 0;
     this.bgImage = null;
@@ -397,7 +426,7 @@ class MainScene extends Phaser.Scene {
 
     // 4. 돌고래 캐릭터 (말풍선 공간 확보를 위해 왼쪽으로 배치)
     if (this.textures.exists('dolphin') && this.textures.get('dolphin').key !== '__MISSING') {
-      this.dolphin = this.add.image(100, 140, 'dolphin').setScale(0.23);
+      this.dolphin = this.add.image(100, 140, 'dolphin').setDisplaySize(236, 236);
       this.tweens.add({
         targets: this.dolphin,
         y: 146,
