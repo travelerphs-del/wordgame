@@ -1,0 +1,1490 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Ancient Library Word Puzzle - V2</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; background-color: #1a0f08; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    #game-wrap { position: relative; width: 100%; max-width: 480px; height: 100vh; max-height: 800px; }
+    #game-container { width: 100%; height: 100%; }
+
+    #name-overlay {
+      position: absolute; inset: 0; z-index: 10;
+      background: radial-gradient(circle at 50% 30%, #3d2817 0%, #1a0f08 75%);
+      display: flex; align-items: center; justify-content: center;
+      font-family: sans-serif; color: #f4e4c1;
+    }
+    #name-overlay .name-card { width: 82%; max-width: 320px; text-align: center; }
+    #name-overlay h1 { font-size: 20px; margin: 0 0 6px; color: #ffd700; text-shadow: 0 0 8px rgba(255,140,0,0.5); }
+    #name-overlay p { font-size: 14px; margin: 0 0 16px; color: #d8b98a; }
+    #name-input {
+      width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 16px;
+      border-radius: 8px; border: 2px solid #d4a017; background: #2b1b0e; color: #ffffff;
+      text-align: center; outline: none;
+    }
+    #name-input::placeholder { color: #a5825a; }
+    #start-btn {
+      width: 100%; margin-top: 12px; padding: 12px; font-size: 16px; font-weight: bold;
+      border-radius: 10px; border: 2px solid #ffffff; background: #b7472a; color: #ffffff;
+      cursor: pointer;
+    }
+    #start-btn:disabled { opacity: 0.6; cursor: default; }
+    #leaderboard-preview {
+      margin-top: 20px; padding: 12px; background: rgba(0,0,0,0.35); border-radius: 10px;
+      font-size: 13px; line-height: 1.6; text-align: left; color: #f0dcb8;
+    }
+    #leaderboard-preview strong { color: #ffd700; }
+  </style>
+</head>
+<body>
+
+<div id="game-wrap">
+  <div id="game-container"></div>
+
+  <div id="name-overlay">
+    <div class="name-card">
+      <h1>📚 고서 도서관 워드 퍼즐</h1>
+      <p>책에 불이 붙기 전에, 단어로 서재를 지켜내세요</p>
+      <input id="name-input" maxlength="10" placeholder="이름 (최대 10자)" autocomplete="off" />
+      <button id="start-btn">시작하기</button>
+      <div id="leaderboard-preview"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let dictionary = new Set();
+const GRID_SIZE = 8;
+// 모음 비율을 높이고 Y도 추가
+const LETTER_POOL = "AAAAAAAAAABBCCDDDDEEEEEEEEEEEEEFFGGHHHIIIIIIIIIJKLLLLMMNNNNNNOOOOOOOOPPQRRRRRRSSSSSSSTTTTTTTUUUUVWWXYYYZ";
+
+// 타일 종류 <-> 텍스처 매핑. V1의 얼음/라바/소용돌이/콘크리트 4종 방해타일은
+// "불타는 타일(burning)" 하나로 통합됐고, 이건 별도 type이 아니라 모든 일반 타일에 얹히는
+// 오버레이 상태(tile.burning)라서 여기 목록엔 없음
+const TILE_TEXTURE = {
+  normal: 'tile_normal',
+  gem: 'tile_gem',
+  pearl: 'tile_pearl',
+  coral: 'tile_coral',
+  bomb: 'tile_bomb'
+};
+
+// 글자 희귀도 점수 (스크래블 표준 배점표). 원작 Bookworm Adventures처럼
+// 희귀한 글자(Q/X/Z 등)를 쓸수록 점수가 높아지게 함
+const LETTER_VALUES = {
+  A: 1, E: 1, I: 1, O: 1, U: 1, L: 1, N: 1, S: 1, T: 1, R: 1,
+  D: 2, G: 2,
+  B: 3, C: 3, M: 3, P: 3,
+  F: 4, H: 4, V: 4, W: 4, Y: 4,
+  K: 5,
+  J: 8, X: 8,
+  Q: 10, Z: 10
+};
+function letterRarityValue(word) {
+  let total = 0;
+  for (const ch of word) total += LETTER_VALUES[ch] || 1;
+  return total;
+}
+const LENGTH_SCORE_PER_LETTER = 50;
+const RARITY_SCORE_PER_POINT = 20;
+const GEM_BONUS_SCORE = 200;
+const BOMB_BONUS_SCORE = 500;
+
+// 불타는 타일: 이 길이 이하(=최소 길이)의 "나쁜 단어"를 만들면 새 불씨가 붙음
+const BURN_IGNITE_WORD_LENGTH = 3;
+
+// 보너스타일: 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
+const BONUS_MILESTONES = [
+  { length: 3, type: 'gem' },
+  { length: 4, type: 'pearl' },
+  { length: 5, type: 'coral' },
+  { length: 6, type: 'bomb' } // 7글자 이상은 보드 완전 리셋(별도 처리, 타일 종류 아님)
+];
+
+// 레벨업 목표점수 증가폭 배수 (800 -> 900 -> 1050 -> ... 로 완만하게 가속)
+const LEVEL_BASE_INCREMENT = 800;
+const LEVEL_INCREMENT_MULTIPLIER = 1.15;
+const LEVEL_CAP = 50;
+const BG_TIER_LEVEL_SPAN = 5; // 배경이 몇 레벨마다 바뀌는지
+const BG_TIER_COUNT = 10;
+
+// 플레이 로그를 구글 폼으로 전송 (V1과 별개 - 이 게임 전용 새 폼을 만들어서 채워야 실제로 전송됨)
+const GOOGLE_FORM_CONFIG = {
+  actionUrl: '', // 예: https://docs.google.com/forms/d/e/xxxxx/formResponse
+  fields: { name: '', level: '', score: '', duration: '' } // 각각 entry.숫자
+};
+
+// 단어 통계용 구글 폼 (게임오버 시점에 그 판에서 만든 단어를 단어당 한 줄씩 일괄 전송)
+const WORD_FORM_CONFIG = {
+  actionUrl: '',
+  fields: { name: '', word: '', length: '', level: '', score: '' }
+};
+
+// 보드가 항상 풀이 가능하도록 보장하는 안전장치용 시드 단어 (쉽고 흔한 단어 위주)
+const SEED_WORDS = [
+  'CAT','DOG','SUN','SEA','FISH','SHIP','CRAB','WAVE','SAND','ROCK',
+  'BLUE','GOLD','STAR','MOON','TREE','LEAF','RAIN','WIND','FIRE','SNOW',
+  'BOOK','WORD','GAME','PLAY','JUMP','RUN','WALK','SWIM','DIVE','SHARK',
+  'WHALE','CORAL','PEARL','OCEAN','TIDE','REEF','KELP','SHELL','SQUID','EEL'
+];
+
+// 오디오
+const SFX_VOLUME = 0.4;
+const MUTE_STORAGE_KEY = 'bookworm_v2_muted';
+
+// 단어 길이별 "품질" 팝업 (라벨/크기/사운드/연출강도) - 양피지->불꽃 색으로 테마에 맞춤
+const WORD_QUALITY_TIERS = {
+  3: { label: 'OK',           fontSize: 22, color: '#f4e4c1', sfx: 'sfx_ok',         sparkle: false, shake: false },
+  4: { label: 'Good',         fontSize: 28, color: '#ffd27d', sfx: 'sfx_good',       sparkle: false, shake: false },
+  5: { label: 'Great!',       fontSize: 34, color: '#ffb84d', sfx: 'sfx_great',      sparkle: false, shake: false },
+  6: { label: 'Excellent!!',  fontSize: 40, color: '#ffd700', sfx: 'sfx_excellent',  sparkle: true,  shake: false },
+  7: { label: 'Fantastic!!!', fontSize: 46, color: '#ff6b35', sfx: 'sfx_fantastic',  sparkle: true,  shake: true }
+};
+
+async function loadDictionary() {
+  try {
+    const response = await fetch('https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_50000.txt');
+    const text = await response.text();
+    text.split('\n').forEach(w => {
+      const clean = w.trim().toUpperCase();
+      if (clean.length >= 2) dictionary.add(clean);
+    });
+  } catch (e) {
+    ['THE','AND','FOR','ARE','BUT','NOT','YOU','ALL','DIG','SIT','CAT','DOG','BOOK','FIRE','WORD','READ','PAGE','TALE'].forEach(w => dictionary.add(w));
+  }
+}
+
+// 최고점수 기록 (로컬 저장) 및 플레이어 이름. V1과 같은 브라우저/도메인을 쓰므로
+// localStorage 키를 반드시 _v2로 구분해야 V1 기록과 안 섞임
+let PLAYER_NAME = '서생';
+const HIGH_SCORE_KEY = 'bookworm_v2_highscores';
+
+function loadHighScores() {
+  try {
+    return JSON.parse(localStorage.getItem(HIGH_SCORE_KEY) || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveHighScore(name, score) {
+  const list = loadHighScores();
+  list.push({ name, score });
+  list.sort((a, b) => b.score - a.score);
+  const top = list.slice(0, 10);
+  try {
+    localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(top));
+  } catch (e) { /* localStorage 사용 불가 시 순위 저장은 생략 */ }
+  return top;
+}
+
+// 게임 종료 시 플레이 로그를 구글 폼으로 전송 (개선 참고용). actionUrl이 비어있으면 조용히 건너뜀
+function submitPlayLog(name, level, score, sessionStartTime) {
+  if (!GOOGLE_FORM_CONFIG.actionUrl) return;
+
+  const durationSeconds = Math.round((Date.now() - sessionStartTime) / 1000);
+  const body = new URLSearchParams();
+  body.append(GOOGLE_FORM_CONFIG.fields.name, name);
+  body.append(GOOGLE_FORM_CONFIG.fields.level, String(level));
+  body.append(GOOGLE_FORM_CONFIG.fields.score, String(score));
+  body.append(GOOGLE_FORM_CONFIG.fields.duration, String(durationSeconds));
+
+  fetch(GOOGLE_FORM_CONFIG.actionUrl, { method: 'POST', mode: 'no-cors', body })
+    .catch(() => { /* 실패해도 게임에는 영향 없음 */ });
+}
+
+// 그 판에서 만든 단어들을 단어당 한 줄씩 구글폼으로 일괄 전송 (게임오버 시점에 한 번에 처리)
+function submitWordLog(name, wordLog) {
+  if (!WORD_FORM_CONFIG.actionUrl) return;
+
+  wordLog.forEach(entry => {
+    const body = new URLSearchParams();
+    body.append(WORD_FORM_CONFIG.fields.name, name);
+    body.append(WORD_FORM_CONFIG.fields.word, entry.word);
+    body.append(WORD_FORM_CONFIG.fields.length, String(entry.length));
+    body.append(WORD_FORM_CONFIG.fields.level, String(entry.level));
+    body.append(WORD_FORM_CONFIG.fields.score, String(entry.score));
+    fetch(WORD_FORM_CONFIG.actionUrl, { method: 'POST', mode: 'no-cors', body })
+      .catch(() => { /* 실패해도 게임에는 영향 없음 */ });
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderLeaderboardPreview() {
+  const list = loadHighScores().slice(0, 5);
+  const el = document.getElementById('leaderboard-preview');
+  if (list.length === 0) {
+    el.innerHTML = '아직 기록이 없습니다.<br>첫 기록의 주인공이 되어보세요!';
+    return;
+  }
+  el.innerHTML = '<strong>🏆 명예의 전당</strong><br>' +
+    list.map((e, i) => `${i + 1}. ${escapeHtml(e.name)} — ${e.score}점`).join('<br>');
+}
+
+class MainScene extends Phaser.Scene {
+  constructor() {
+    super({ key: 'MainScene' });
+  }
+
+  preload() {
+    this.createFallbackTextures();
+    this.load.image('mascot', 'assets/mascot.png');
+    for (const key in TILE_TEXTURE) {
+      this.load.image(TILE_TEXTURE[key], `assets/${TILE_TEXTURE[key]}.png`);
+    }
+    for (let i = 1; i <= BG_TIER_COUNT; i++) {
+      this.load.image('bg_library_' + i, `assets/bg_library_${i}.png`);
+    }
+
+    // 사운드 (V1과 같은 파일명 규칙이라 원한다면 같은 mp3를 그대로 복사해도 동작함)
+    this.load.audio('sfx_tile_select_1', 'assets/sfx_tile_select_1.mp3');
+    this.load.audio('sfx_tile_select_2', 'assets/sfx_tile_select_2.mp3');
+    this.load.audio('sfx_tile_select_3', 'assets/sfx_tile_select_3.mp3');
+    this.load.audio('sfx_tile_slide', 'assets/sfx_tile_slide.mp3');
+    this.load.audio('sfx_tile_land', 'assets/sfx_tile_land.mp3');
+    this.load.audio('sfx_ok', 'assets/sfx_ok.mp3');
+    this.load.audio('sfx_good', 'assets/sfx_good.mp3');
+    this.load.audio('sfx_great', 'assets/sfx_great.mp3');
+    this.load.audio('sfx_excellent', 'assets/sfx_excellent.mp3');
+    this.load.audio('sfx_fantastic', 'assets/sfx_fantastic.mp3');
+    this.load.audio('sfx_fire_crackle', 'assets/sfx_fire_crackle.mp3'); // 새 불씨가 붙을 때 (선택)
+    this.load.audio('sfx_extinguish', 'assets/sfx_extinguish.mp3'); // 불이 꺼질 때 (선택)
+  }
+
+  // 로드된 사운드만 안전하게 재생 (파일이 아직 없어도 게임이 죽지 않도록)
+  playSfx(key, config) {
+    if (this.cache.audio.exists(key)) {
+      this.sound.play(key, Object.assign({ volume: SFX_VOLUME }, config));
+    }
+  }
+
+  createFallbackTextures() {
+    let g = this.add.graphics();
+    g.fillStyle(0xe6bc8a, 1);
+    g.fillRoundedRect(0, 0, 50, 50, 8);
+    g.lineStyle(2, 0x5c3a21, 1);
+    g.strokeRoundedRect(0, 0, 50, 50, 8);
+    g.generateTexture('fallback_tile', 50, 50);
+    g.destroy();
+
+    // 타일 마찰 스파크용 작은 원형 텍스처
+    let s = this.add.graphics();
+    s.fillStyle(0xffe066, 1);
+    s.fillCircle(4, 4, 4);
+    s.generateTexture('spark_particle', 8, 8);
+    s.destroy();
+  }
+
+  // 타일이 서로 스치며 미끄러질 때 튀는 작은 불꽃 (1회성 버스트)
+  spawnSparks(x, y) {
+    const emitter = this.add.particles(x, y, 'spark_particle', {
+      speed: { min: 30, max: 90 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.7, end: 0 },
+      alpha: { start: 1, end: 0 },
+      lifespan: 250,
+      quantity: 5,
+      tint: [0xfff176, 0xffd700, 0xffffff]
+    });
+    emitter.explode(5);
+    this.time.delayedCall(320, () => emitter.destroy());
+  }
+
+  // 타일이 완전히 밀착한 채로 낙하하는 동안 좌우 가장자리에서 계속 스파크가 튀도록 함
+  startFrictionSparks(tile, duration) {
+    const half = tile.baseSize / 2;
+    const emitter = this.add.particles(tile.image.x, tile.image.y, 'spark_particle', {
+      x: { min: -half, max: half },
+      y: 0,
+      speed: { min: 15, max: 50 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.5, end: 0 },
+      alpha: { start: 1, end: 0 },
+      lifespan: 200,
+      frequency: 40,
+      tint: [0xfff176, 0xffd700, 0xffffff]
+    });
+    emitter.setDepth(5);
+    emitter.startFollow(tile.image);
+    this.time.delayedCall(duration, () => {
+      emitter.stop();
+      this.time.delayedCall(300, () => emitter.destroy());
+    });
+  }
+
+  // 레벨 5단계마다 더 깊은 서고(書庫)로 전환 (1~10 티어)
+  setBackgroundTier(tier) {
+    tier = Math.max(1, Math.min(BG_TIER_COUNT, tier));
+    const key = 'bg_library_' + tier;
+    const hasTexture = this.textures.exists(key) && this.textures.get(key).key !== '__MISSING';
+
+    if (!this.bgImage) {
+      if (hasTexture) {
+        this.bgImage = this.add.image(240, 400, key).setDisplaySize(480, 800).setDepth(-1);
+      } else {
+        this.cameras.main.setBackgroundColor('#2b1b0e');
+      }
+      this.bgTier = tier;
+      return;
+    }
+
+    if (tier === this.bgTier || !hasTexture) return;
+    this.bgTier = tier;
+    this.tweens.add({
+      targets: this.bgImage,
+      alpha: 0,
+      duration: 250,
+      onComplete: () => {
+        this.bgImage.setTexture(key);
+        this.tweens.add({ targets: this.bgImage, alpha: 1, duration: 250 });
+      }
+    });
+  }
+
+  create() {
+    const GAME_WIDTH = 480;
+
+    try { this.sound.mute = localStorage.getItem(MUTE_STORAGE_KEY) === '1'; } catch (e) { /* localStorage 사용 불가 시 무시 */ }
+
+    // 1. 배경
+    this.bgTier = 0;
+    this.bgImage = null;
+    this.setBackgroundTier(1);
+
+    // 2. 상단 HUD (SCORE/LV + 다음 레벨까지 진행도 바). 타이머가 없어져서 V1보다 낮고 단순함
+    let hudBg = this.add.graphics();
+    hudBg.fillStyle(0x000000, 0.5);
+    hudBg.fillRoundedRect(15, 10, GAME_WIDTH - 55, 50, 10);
+
+    this.scoreText = this.add.text(30, 20, 'SCORE: 0', {
+      font: 'bold 18px sans-serif', fill: '#ffffff', stroke: '#000000', strokeThickness: 3
+    });
+    this.levelText = this.add.text(GAME_WIDTH - 55, 20, 'LV: 1', {
+      font: 'bold 18px sans-serif', fill: '#ffd700', stroke: '#000000', strokeThickness: 3
+    }).setOrigin(1, 0);
+
+    this.createMuteButton(GAME_WIDTH);
+    this.createRulesButton(GAME_WIDTH);
+
+    // 2-1. 다음 레벨까지 남은 점수 진행도 바
+    this.levelProgressBarBg = this.add.graphics();
+    this.levelProgressBarBg.fillStyle(0x222222, 0.8);
+    this.levelProgressBarBg.fillRoundedRect(30, 40, GAME_WIDTH - 85, 6, 3);
+    this.levelProgressBar = this.add.graphics();
+
+    // 3. 마스코트 캐릭터 (애셋 준비 전엔 자동으로 생략됨)
+    if (this.textures.exists('mascot') && this.textures.get('mascot').key !== '__MISSING') {
+      this.mascot = this.add.image(100, 120, 'mascot').setScale(0.23);
+      this.tweens.add({
+        targets: this.mascot, y: 126, duration: 1500, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+      });
+    }
+
+    // 4. 단어 표시 박스
+    let wordBg = this.add.graphics();
+    wordBg.fillStyle(0x000000, 0.6);
+    wordBg.fillRoundedRect(GAME_WIDTH / 2 - 110, 195, 220, 38, 8);
+
+    this.wordText = this.add.text(GAME_WIDTH / 2, 214, '-', {
+      font: 'bold 26px sans-serif', fill: '#ffe600', stroke: '#000000', strokeThickness: 2
+    }).setOrigin(0.5);
+
+    this.selectedPath = [];
+    this.score = 0;
+    this.level = 1;
+    this.levelIncrement = LEVEL_BASE_INCREMENT;
+    this.targetScore = LEVEL_BASE_INCREMENT;
+    this.isPaused = false;
+    this.isGameOver = false;
+    this.isBoardBusy = false;
+    this.burningTiles = [];
+    this.wordBubbleRequestId = 0;
+    this.wordBubbleHideTimer = null;
+    this.slideSoundInstance = null;
+    this.sessionStartTime = Date.now();
+    this.sessionWordLog = [];
+
+    // 5. 보드 및 하단 컨트롤
+    this.createBoard(GAME_WIDTH);
+    this.ensureSolvable();
+    this.createControls(GAME_WIDTH);
+    this.createWordBubble();
+
+    // 6. 팝업 UI
+    this.createPopupUI(GAME_WIDTH);
+    this.createRulesPopup(GAME_WIDTH);
+
+    this.updateLevelProgressBar(GAME_WIDTH);
+  }
+
+  createPopupUI(gameWidth) {
+    this.popupContainer = this.add.container(0, 0).setDepth(100).setVisible(false);
+
+    let overlay = this.add.graphics();
+    overlay.fillStyle(0x1a0f08, 0.85);
+    overlay.fillRect(0, 0, gameWidth, 800);
+    this.popupContainer.add(overlay);
+
+    let card = this.add.graphics();
+    card.fillStyle(0x2b1b0e, 0.95);
+    card.fillRoundedRect(gameWidth / 2 - 170, 200, 340, 420, 16);
+    card.lineStyle(3, 0xd4a017, 0.8);
+    card.strokeRoundedRect(gameWidth / 2 - 170, 200, 340, 420, 16);
+    this.popupContainer.add(card);
+
+    this.popupTitle = this.add.text(gameWidth / 2, 240, 'LEVEL UP!', {
+      font: 'bold 28px sans-serif', fill: '#ffd700', stroke: '#000000', strokeThickness: 3
+    }).setOrigin(0.5);
+    this.popupContainer.add(this.popupTitle);
+
+    this.popupDesc = this.add.text(gameWidth / 2, 290, '', {
+      font: '16px sans-serif', fill: '#f4e4c1', align: 'center', lineSpacing: 8
+    }).setOrigin(0.5, 0);
+    this.popupContainer.add(this.popupDesc);
+
+    let popupBtn = this.add.container(gameWidth / 2, 570);
+
+    let btnBg = this.add.graphics();
+    btnBg.fillStyle(0xb7472a, 1);
+    btnBg.fillRoundedRect(-80, -22, 160, 44, 10);
+    btnBg.lineStyle(2, 0xffffff, 0.9);
+    btnBg.strokeRoundedRect(-80, -22, 160, 44, 10);
+    popupBtn.add(btnBg);
+
+    this.popupBtnText = this.add.text(0, 0, '확인', {
+      font: 'bold 18px sans-serif', fill: '#ffffff'
+    }).setOrigin(0.5);
+    popupBtn.add(this.popupBtnText);
+
+    let btnZone = this.add.zone(0, 0, 160, 44).setInteractive();
+    popupBtn.add(btnZone);
+
+    btnZone.on('pointerdown', () => {
+      this.tweens.killTweensOf(popupBtn);
+      this.tweens.add({
+        targets: popupBtn, scaleX: 0.9, scaleY: 0.9, duration: 60, yoyo: true, ease: 'Sine.easeOut'
+      });
+      if (this.isGameOver) {
+        this.restartGame();
+      } else {
+        this.popupContainer.setVisible(false);
+        this.isPaused = false;
+      }
+    });
+    this.popupContainer.add(popupBtn);
+  }
+
+  // 레벨업 보상: 화면 중앙에 1초간 플래시 텍스트 + 현재 불타는 타일을 전부 진화시킴
+  // (원작처럼 "실력이 곧 안전"이 되도록 - 타이머 리필 대신 이걸로 대체)
+  showLevelUpPopup(newLevel) {
+    const hadBurning = this.burningTiles.length > 0;
+    this.burningTiles.slice().forEach(t => this.extinguishTile(t));
+
+    this.setBackgroundTier(Math.min(BG_TIER_COUNT, Math.floor((newLevel - 1) / BG_TIER_LEVEL_SPAN) + 1));
+
+    if (this.levelFlashText) { this.tweens.killTweensOf(this.levelFlashText); this.levelFlashText.destroy(); }
+
+    const txt = this.add.text(240, 330, `LEVEL ${newLevel}!`, {
+      fontFamily: '"Luckiest Guy"', fontSize: '56px',
+      fill: '#ffd700', stroke: '#000000', strokeThickness: 8
+    }).setOrigin(0.5).setDepth(70).setScale(0.4).setAlpha(0);
+    this.levelFlashText = txt;
+
+    this.tweens.add({
+      targets: txt, scale: 1, alpha: 1, duration: 200, ease: 'Back.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: txt, alpha: 0, duration: 300, delay: 500,
+          onComplete: () => { txt.destroy(); if (this.levelFlashText === txt) this.levelFlashText = null; }
+        });
+      }
+    });
+
+    if (hadBurning) this.showFloatingText(240, 400, '🧯 레벨업! 불이 모두 꺼졌습니다', '#7dffd0');
+  }
+
+  showGameOverPopup(reason) {
+    this.isPaused = true;
+    this.isGameOver = true;
+
+    const topScores = saveHighScore(PLAYER_NAME, this.score);
+    const rankLines = topScores.slice(0, 5)
+      .map((entry, i) => `${i + 1}. ${entry.name} - ${entry.score}`)
+      .join('\n');
+
+    this.popupTitle.setText('GAME OVER').setFill('#ff4d4d');
+    this.popupDesc.setText(
+      `${reason ? reason + '\n\n' : ''}${PLAYER_NAME}님의 최종 점수: ${this.score}점\n\n🏆 TOP 5\n${rankLines}`
+    );
+    this.popupBtnText.setText('다시 시작');
+    this.popupContainer.setVisible(true);
+
+    submitPlayLog(PLAYER_NAME, this.level, this.score, this.sessionStartTime);
+    submitWordLog(PLAYER_NAME, this.sessionWordLog);
+  }
+
+  restartGame() {
+    this.isGameOver = false;
+    this.isPaused = false;
+    this.isBoardBusy = false;
+    this.score = 0;
+    this.level = 1;
+    this.levelIncrement = LEVEL_BASE_INCREMENT;
+    this.targetScore = LEVEL_BASE_INCREMENT;
+    this.sessionStartTime = Date.now();
+    this.sessionWordLog = [];
+
+    if (this.slideSoundInstance) { this.slideSoundInstance.stop(); this.slideSoundInstance = null; }
+
+    this.burningTiles.forEach(t => this.tweens.killTweensOf(t.image));
+    this.burningTiles = [];
+
+    this.hideWordBubble();
+
+    if (this.levelFlashText) { this.tweens.killTweensOf(this.levelFlashText); this.levelFlashText.destroy(); this.levelFlashText = null; }
+
+    this.scoreText.setText('SCORE: 0');
+    this.levelText.setText('LV: 1');
+
+    this.clearSelection();
+    this.popupContainer.setVisible(false);
+    this.setBackgroundTier(1);
+    this.updateLevelProgressBar(480);
+
+    this.rebuildBoard();
+    this.ensureSolvable();
+  }
+
+  rebuildBoard() {
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        let tileObj = this.board[r][c];
+        this.tweens.killTweensOf(tileObj.image);
+        this.tweens.killTweensOf(tileObj.text);
+
+        const x = this.boardStartX + c * this.tileSizeWithGap;
+        const y = this.boardStartY + r * this.tileSizeWithGap;
+        tileObj.image.setPosition(x, y).setDisplaySize(tileObj.baseSize, tileObj.baseSize).setAlpha(1).clearTint().setTexture(this.tileKey);
+        tileObj.text.setPosition(x, y).setScale(1).setAlpha(1);
+
+        tileObj.type = 'normal';
+        tileObj.burning = false;
+
+        tileObj.letter = LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
+        tileObj.text.setText(tileObj.letter);
+      }
+    }
+  }
+
+  // 7글자 이상 단어 완성 보상: 보드 전체를 새로 채움 (불타는 타일도 전부 진화됨).
+  // restartGame()과 달리 점수/레벨/배경 티어는 그대로 유지 — 재시작이 아니라 인게임 보상 효과
+  triggerFullBoardReset() {
+    this.burningTiles.forEach(t => this.tweens.killTweensOf(t.image));
+    this.burningTiles = [];
+
+    this.rebuildBoard();
+    this.ensureSolvable();
+
+    this.cameras.main.shake(220, 0.01);
+    this.showFloatingText(240, 200, '💥 보드 완전 리셋!', '#ff9d4d');
+  }
+
+  // 정답으로 제출된 타일들을 제거하고, 중력에 의해 위에서 새 타일이 떨어져 채워지도록 함
+  removeAndRefill(tiles, forcedBonusType) {
+    this.isBoardBusy = true;
+
+    const removedSet = new Set(tiles);
+    // 폭탄 등으로 함께 사라지는 불타는 타일은 추적 목록에서 정리 (이미 destroy될 예정이라 별도 소화 처리 불필요)
+    this.burningTiles = this.burningTiles.filter(t => !removedSet.has(t));
+
+    let popRemaining = tiles.length;
+    if (popRemaining === 0) { this.isBoardBusy = false; return; }
+
+    tiles.forEach(tile => {
+      this.tweens.killTweensOf(tile.image);
+      this.tweens.add({
+        targets: [tile.image, tile.text],
+        scaleX: 0, scaleY: 0, alpha: 0, duration: 160, ease: 'Back.easeIn',
+        onComplete: () => {
+          tile.image.destroy();
+          tile.text.destroy();
+          popRemaining--;
+          if (popRemaining === 0) this.applyGravity(removedSet, forcedBonusType);
+        }
+      });
+    });
+  }
+
+  applyGravity(removedSet, forcedBonusType) {
+    const newBoard = Array.from({ length: GRID_SIZE }, () => new Array(GRID_SIZE).fill(null));
+    const newSlots = [];
+    this.fallingRemaining = 0;
+
+    for (let c = 0; c < GRID_SIZE; c++) {
+      let survivors = [];
+      for (let r = 0; r < GRID_SIZE; r++) {
+        const t = this.board[r][c];
+        if (!removedSet.has(t)) survivors.push(t);
+      }
+      const missing = GRID_SIZE - survivors.length;
+
+      survivors.forEach((tile, i) => {
+        const targetRow = missing + i;
+        const oldRow = tile.r;
+        tile.r = targetRow;
+        newBoard[targetRow][c] = tile;
+
+        const newY = this.boardStartY + targetRow * this.tileSizeWithGap;
+        if (targetRow !== oldRow) {
+          this.fallingRemaining++;
+          this.animateTileFall(tile, newY, () => this.onTileLanded());
+        }
+      });
+
+      for (let i = 0; i < missing; i++) {
+        newSlots.push({ col: c, targetRow: i, spawnStepsFromBoard: missing - i });
+      }
+    }
+
+    const forcedSlotIndex = (forcedBonusType && newSlots.length > 0)
+      ? Math.floor(Math.random() * newSlots.length) : -1;
+
+    newSlots.forEach((slot, idx) => {
+      const type = idx === forcedSlotIndex ? forcedBonusType : 'normal';
+      const tile = this.createTileAt(slot.targetRow, slot.col, null, type);
+      newBoard[slot.targetRow][slot.col] = tile;
+
+      const spawnY = this.boardStartY - this.tileSizeWithGap * slot.spawnStepsFromBoard;
+      tile.image.y = spawnY;
+      tile.text.y = spawnY;
+
+      const newY = this.boardStartY + slot.targetRow * this.tileSizeWithGap;
+      this.fallingRemaining++;
+      this.animateTileFall(tile, newY, () => this.onTileLanded());
+    });
+
+    this.board = newBoard;
+
+    if (this.fallingRemaining === 0) {
+      this.isBoardBusy = false;
+    } else {
+      this.startSlideSound();
+    }
+  }
+
+  // 낙하 배치 전체에 대해 슬라이드음을 딱 1개만 재생
+  startSlideSound() {
+    this.stopSlideSound();
+    if (this.cache.audio.exists('sfx_tile_slide')) {
+      this.slideSoundInstance = this.sound.add('sfx_tile_slide', { volume: SFX_VOLUME, loop: true });
+      this.slideSoundInstance.play();
+    }
+  }
+
+  stopSlideSound() {
+    if (!this.slideSoundInstance) return;
+    const snd = this.slideSoundInstance;
+    this.slideSoundInstance = null;
+    this.tweens.add({ targets: snd, volume: 0, duration: 120, onComplete: () => snd.stop() });
+  }
+
+  animateTileFall(tile, targetY, onComplete) {
+    const distance = Math.abs(targetY - tile.image.y);
+    const duration = Math.min(1300, 280 + distance * 2.2);
+
+    this.startFrictionSparks(tile, duration);
+
+    this.tweens.add({
+      targets: [tile.image, tile.text],
+      y: targetY,
+      duration,
+      ease: 'Quad.easeIn',
+      onComplete: () => {
+        this.playLandingSettle(tile);
+        if (onComplete) onComplete();
+      }
+    });
+  }
+
+  playLandingSettle(tile) {
+    this.tweens.killTweensOf(tile.image);
+    tile.image.setDisplaySize(tile.baseSize, tile.baseSize);
+    this.tweens.add({
+      targets: [tile.image], displaySizeY: tile.baseSize * 0.85, duration: 60, ease: 'Sine.easeOut',
+      onComplete: () => {
+        this.tweens.add({ targets: [tile.image], displaySizeY: tile.baseSize, duration: 90, ease: 'Back.easeOut' });
+      }
+    });
+  }
+
+  onTileLanded() {
+    this.fallingRemaining--;
+    if (this.fallingRemaining <= 0) {
+      this.isBoardBusy = false;
+      this.ensureSolvable();
+      this.stopSlideSound();
+      this.cameras.main.shake(160, 0.007);
+      this.playSfx('sfx_tile_land');
+    }
+  }
+
+  // 이번 레벨 구간(targetScore - levelIncrement ~ targetScore) 안에서의 진행률을 표시
+  updateLevelProgressBar(gameWidth) {
+    this.levelProgressBar.clear();
+    const segStart = this.targetScore - this.levelIncrement;
+    const pct = this.level >= LEVEL_CAP
+      ? 1
+      : Math.max(0, Math.min(1, (this.score - segStart) / this.levelIncrement));
+    const barWidth = (gameWidth - 85) * pct;
+
+    this.levelProgressBar.fillStyle(0xffd700, 1);
+    this.levelProgressBar.fillRoundedRect(30, 40, barWidth, 6, 3);
+  }
+
+  // === 불타는 타일 시스템 ===================================================
+
+  // 무작위 일반 타일 하나에 새로 불을 붙임 (이미 불타는 타일은 후보에서 제외)
+  igniteRandomTile() {
+    const candidates = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        const t = this.board[r][c];
+        if (t && t.type === 'normal' && !t.burning) candidates.push(t);
+      }
+    }
+    if (candidates.length === 0) return;
+
+    const tile = candidates[Math.floor(Math.random() * candidates.length)];
+    tile.burning = true;
+    this.burningTiles.push(tile);
+    this.updateBurnVisual(tile);
+    this.playSfx('sfx_fire_crackle');
+  }
+
+  // 불 상태 시각 표시: 바닥에 가까울수록(row가 클수록) 노랑->빨강으로 짙어지고 깜빡임도 빨라짐
+  updateBurnVisual(tile) {
+    this.tweens.killTweensOf(tile.image);
+    if (!tile.burning) {
+      tile.image.clearTint().setAlpha(1);
+      return;
+    }
+    const pct = (GRID_SIZE <= 1) ? 1 : tile.r / (GRID_SIZE - 1);
+    const from = { r: 255, g: 214, b: 0 };
+    const to = { r: 255, g: 20, b: 0 };
+    const r = Math.round(from.r + (to.r - from.r) * pct);
+    const g = Math.round(from.g + (to.g - from.g) * pct);
+    const b = Math.round(from.b + (to.b - from.b) * pct);
+    tile.image.setTint((r << 16) | (g << 8) | b);
+    this.tweens.add({
+      targets: tile.image, alpha: 0.55, duration: 350 - pct * 200, yoyo: true, repeat: -1
+    });
+  }
+
+  extinguishTile(tile) {
+    tile.burning = false;
+    this.burningTiles = this.burningTiles.filter(t => t !== tile);
+    this.tweens.killTweensOf(tile.image);
+    tile.image.clearTint().setAlpha(1);
+    this.playSfx('sfx_extinguish');
+  }
+
+  // 매 단어 제출마다 호출: usedSet에 포함된 불타는 타일은 소화하고, 나머지는 한 칸씩 아래로 번짐.
+  // 번지다가 바닥 줄에 닿으면 즉시 게임오버. 반환값: 이 호출로 게임오버가 트리거됐는지 여부
+  advanceBurningTiles(usedSet) {
+    this.burningTiles.slice().forEach(tile => {
+      if (usedSet.has(tile)) this.extinguishTile(tile);
+    });
+
+    // 바닥에 가까운 것부터 처리해야 서로 위치가 꼬이지 않음
+    const creeping = this.burningTiles.slice().sort((a, b) => b.r - a.r);
+    for (const tile of creeping) {
+      if (!tile.burning) continue; // 방금 소화됨
+
+      if (tile.r >= GRID_SIZE - 1) {
+        this.triggerLibraryBurned();
+        return true;
+      }
+
+      const belowTile = this.board[tile.r + 1][tile.c];
+      const tr = tile.r, tc = tile.c;
+      const br = belowTile.r, bc = belowTile.c;
+      this.board[tr][tc] = belowTile;
+      this.board[br][bc] = tile;
+      tile.r = br; tile.c = bc;
+      belowTile.r = tr; belowTile.c = tc;
+
+      const tileX = this.boardStartX + bc * this.tileSizeWithGap;
+      const tileY = this.boardStartY + br * this.tileSizeWithGap;
+      const belowX = this.boardStartX + tc * this.tileSizeWithGap;
+      const belowY = this.boardStartY + tr * this.tileSizeWithGap;
+      this.tweens.add({ targets: [tile.image, tile.text], x: tileX, y: tileY, duration: 260, ease: 'Sine.easeInOut' });
+      this.tweens.add({ targets: [belowTile.image, belowTile.text], x: belowX, y: belowY, duration: 260, ease: 'Sine.easeInOut' });
+
+      this.updateBurnVisual(tile);
+
+      if (tile.r === GRID_SIZE - 1) {
+        this.triggerLibraryBurned();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  triggerLibraryBurned() {
+    if (this.isGameOver) return;
+    this.cameras.main.shake(280, 0.012);
+    this.showGameOverPopup('🔥 서재가 불타버렸습니다!');
+  }
+
+  // 10레벨마다 호출: 보너스 타일은 그대로 두고, 일반 타일들의 글자만
+  // LETTER_POOL의 실제 모음/자음 비율에 맞춰 다시 뽑아 배정
+  rebalanceLetterTiles() {
+    const normalTiles = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        const t = this.board[r][c];
+        if (t && t.type === 'normal') normalTiles.push(t);
+      }
+    }
+    if (normalTiles.length === 0) return;
+
+    const isVowel = ch => 'AEIOU'.includes(ch);
+    const vowelPool = LETTER_POOL.split('').filter(isVowel);
+    const consonantPool = LETTER_POOL.split('').filter(ch => !isVowel(ch));
+    const targetVowels = Math.round(normalTiles.length * vowelPool.length / LETTER_POOL.length);
+
+    const newLetters = [];
+    for (let i = 0; i < targetVowels; i++) newLetters.push(vowelPool[Math.floor(Math.random() * vowelPool.length)]);
+    for (let i = targetVowels; i < normalTiles.length; i++) newLetters.push(consonantPool[Math.floor(Math.random() * consonantPool.length)]);
+    newLetters.sort(() => Math.random() - 0.5);
+
+    normalTiles.forEach((tile, i) => {
+      tile.letter = newLetters[i];
+      tile.text.setText(tile.letter);
+    });
+
+    this.ensureSolvable();
+    this.showFloatingText(240, 200, '🔤 글자 재배치!', '#7dffd0');
+  }
+
+  createBoard(gameWidth) {
+    this.board = [];
+    this.tileDisplaySize = 56;
+    this.tileGap = 0;
+    this.tileSizeWithGap = this.tileDisplaySize + this.tileGap;
+
+    const boardTotalWidth = GRID_SIZE * this.tileSizeWithGap - this.tileGap;
+    this.boardStartX = (gameWidth - boardTotalWidth) / 2 + (this.tileDisplaySize / 2);
+    this.boardStartY = 260;
+
+    this.tileKey = (this.textures.exists('tile_normal') && this.textures.get('tile_normal').key !== '__MISSING')
+                    ? 'tile_normal' : 'fallback_tile';
+
+    for (let r = 0; r < GRID_SIZE; r++) {
+      let row = [];
+      for (let c = 0; c < GRID_SIZE; c++) {
+        row.push(this.createTileAt(r, c, null, 'normal'));
+      }
+      this.board.push(row);
+    }
+  }
+
+  // 특정 (r, c) 위치에 새 타일 오브젝트를 생성 (낙하 리필에서도 재사용)
+  createTileAt(r, c, letter, type) {
+    type = type || 'normal';
+    const x = this.boardStartX + c * this.tileSizeWithGap;
+    const y = this.boardStartY + r * this.tileSizeWithGap;
+    const finalLetter = letter || LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
+
+    const textureKey = (this.textures.exists(TILE_TEXTURE[type]) && this.textures.get(TILE_TEXTURE[type]).key !== '__MISSING')
+                        ? TILE_TEXTURE[type] : this.tileKey;
+
+    let tileImage = this.add.image(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
+    let tileText = this.add.text(x, y, finalLetter, {
+      font: 'bold 28px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
+    }).setOrigin(0.5);
+
+    let tileObj = {
+      r, c, letter: finalLetter, image: tileImage, text: tileText, type,
+      baseSize: this.tileDisplaySize, burning: false
+    };
+
+    tileImage.on('pointerdown', () => this.handleTileClick(tileObj));
+
+    return tileObj;
+  }
+
+  createControls(gameWidth) {
+    const btnY = 735;
+    const btnWidth = 170;
+    const btnHeight = 46;
+    const spacing = 20;
+
+    const buttons = [
+      { label: 'CLEAR', color: 0xc0392b, action: () => this.clearSelection() },
+      { label: 'SUBMIT', color: 0x27ae60, action: () => this.submitWord() }
+    ];
+
+    const totalWidth = buttons.length * btnWidth + (buttons.length - 1) * spacing;
+    const startX = (gameWidth - totalWidth) / 2 + btnWidth / 2;
+
+    buttons.forEach((btn, idx) => {
+      const x = startX + idx * (btnWidth + spacing);
+
+      let bg = this.add.graphics();
+      bg.fillStyle(btn.color, 1);
+      bg.fillRoundedRect(-btnWidth / 2, -btnHeight / 2, btnWidth, btnHeight, 8);
+      bg.lineStyle(2, 0xffffff, 0.8);
+      bg.strokeRoundedRect(-btnWidth / 2, -btnHeight / 2, btnWidth, btnHeight, 8);
+
+      let text = this.add.text(0, 0, btn.label, {
+        font: 'bold 17px sans-serif', fill: '#ffffff'
+      }).setOrigin(0.5);
+
+      let container = this.add.container(x, btnY, [bg, text]);
+
+      let zone = this.add.zone(0, 0, btnWidth, btnHeight).setInteractive();
+      container.add(zone);
+
+      zone.on('pointerdown', () => {
+        if (this.isPaused || this.isGameOver || this.isBoardBusy) return;
+        this.tweens.killTweensOf(container);
+        this.tweens.add({
+          targets: container, scaleX: 0.88, scaleY: 0.88, duration: 60, yoyo: true, ease: 'Sine.easeOut'
+        });
+        btn.action();
+      });
+    });
+  }
+
+  handleTileClick(tile) {
+    if (this.isPaused || this.isGameOver || this.isBoardBusy) return;
+
+    // V2는 선택 불가 타일이 없음 (불타는 타일도 선택 가능해야 꺼서 살릴 수 있음)
+    this.playSfx('sfx_tile_select_' + (1 + Math.floor(Math.random() * 3)));
+    this.tweens.killTweensOf([tile.image, tile.text]);
+    this.tweens.add({
+      targets: [tile.image, tile.text], y: '-=10', duration: 90, ease: 'Sine.easeOut', yoyo: true
+    });
+
+    const index = this.selectedPath.indexOf(tile);
+    if (index !== -1) {
+      const deselected = this.selectedPath.slice(index + 1);
+      this.selectedPath = this.selectedPath.slice(0, index + 1);
+      deselected.forEach(t => this.deselectTile(t));
+    } else if (this.selectedPath.length === 0) {
+      this.selectedPath.push(tile);
+      this.selectTile(tile);
+    } else {
+      const last = this.selectedPath[this.selectedPath.length - 1];
+      const dr = Math.abs(tile.r - last.r), dc = Math.abs(tile.c - last.c);
+      const isAdjacent = dr <= 1 && dc <= 1;
+      if (isAdjacent) {
+        this.selectedPath.push(tile);
+        this.selectTile(tile);
+      } else {
+        this.selectedPath.forEach(t => this.deselectTile(t));
+        this.selectedPath = [tile];
+        this.selectTile(tile);
+      }
+    }
+
+    const word = this.selectedPath.map(t => t.letter).join('');
+    this.wordText.setText(word || '-');
+  }
+
+  selectTile(tile) {
+    tile.image.setTint(0x5be8ff);
+  }
+
+  // 불타는 타일을 선택했다가 해제할 땐, 파란 선택 틴트가 아니라 불 틴트로 되돌려야 함
+  deselectTile(tile) {
+    if (tile.burning) this.updateBurnVisual(tile);
+    else tile.image.clearTint();
+  }
+
+  clearSelection() {
+    this.selectedPath.forEach(t => this.deselectTile(t));
+    this.selectedPath = [];
+    this.wordText.setText('-');
+  }
+
+  // 가로/세로/대각선 방향(dr, dc)에 해당하는 모든 줄을 타일 배열로 구성
+  getLinesForDirection(dr, dc) {
+    const lines = [];
+    if (dr === 0) {
+      for (let r = 0; r < GRID_SIZE; r++) lines.push(this.board[r].slice());
+    } else if (dc === 0) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        const col = [];
+        for (let r = 0; r < GRID_SIZE; r++) col.push(this.board[r][c]);
+        lines.push(col);
+      }
+    } else if (dr === dc) {
+      for (let k = -(GRID_SIZE - 1); k <= GRID_SIZE - 1; k++) {
+        const line = [];
+        for (let r = 0; r < GRID_SIZE; r++) {
+          const c = r - k;
+          if (c >= 0 && c < GRID_SIZE) line.push(this.board[r][c]);
+        }
+        if (line.length >= 3) lines.push(line);
+      }
+    } else {
+      for (let k = 0; k <= 2 * (GRID_SIZE - 1); k++) {
+        const line = [];
+        for (let r = 0; r < GRID_SIZE; r++) {
+          const c = k - r;
+          if (c >= 0 && c < GRID_SIZE) line.push(this.board[r][c]);
+        }
+        if (line.length >= 3) lines.push(line);
+      }
+    }
+    return lines;
+  }
+
+  // 보드가 항상 풀이 가능한지 확인하는 안전장치. V2는 선택 불가 타일이 없으므로
+  // 세그먼트를 끊을 필요 없이 각 줄을 통째로 스캔
+  findPossibleWord() {
+    const directions = [[0, 1], [1, 0], [1, 1], [1, -1]];
+
+    for (const [dr, dc] of directions) {
+      const lines = this.getLinesForDirection(dr, dc);
+
+      for (const line of lines) {
+        for (let start = 0; start < line.length; start++) {
+          const maxEnd = Math.min(line.length - 1, start + 4);
+          for (let end = start + 2; end <= maxEnd; end++) {
+            const slice = line.slice(start, end + 1);
+            const forward = slice.map(t => t.letter).join('');
+            if (dictionary.has(forward)) return slice;
+            const backward = slice.map(t => t.letter).reverse().join('');
+            if (dictionary.has(backward)) return slice.slice().reverse();
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  ensureSolvable() {
+    if (this.findPossibleWord()) return;
+    this.injectGuaranteedWord();
+  }
+
+  injectGuaranteedWord() {
+    const directions = [[0, 1], [1, 0], [1, 1], [1, -1]];
+    const candidates = [];
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        directions.forEach(([dr, dc]) => candidates.push({ r, c, dr, dc }));
+      }
+    }
+    candidates.sort(() => Math.random() - 0.5);
+
+    const words = SEED_WORDS.slice().sort(() => Math.random() - 0.5);
+
+    for (const start of candidates) {
+      for (const word of words) {
+        const endR = start.r + start.dr * (word.length - 1);
+        const endC = start.c + start.dc * (word.length - 1);
+        if (endR < 0 || endR >= GRID_SIZE || endC < 0 || endC >= GRID_SIZE) continue;
+
+        const targetTiles = [];
+        let ok = true;
+        for (let i = 0; i < word.length; i++) {
+          const t = this.board[start.r + start.dr * i][start.c + start.dc * i];
+          // 특수 타일/불타는 타일은 건드리지 않고 일반 타일만 덮어씀
+          if (!t || t.type !== 'normal' || t.burning) { ok = false; break; }
+          targetTiles.push(t);
+        }
+        if (!ok) continue;
+
+        targetTiles.forEach((t, i) => {
+          t.letter = word[i];
+          t.text.setText(word[i]);
+        });
+        return;
+      }
+    }
+  }
+
+  // 음소거 토글 버튼
+  createMuteButton(gameWidth) {
+    const x = gameWidth - 20, y = 29;
+
+    let bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.5);
+    bg.fillRoundedRect(x - 15, y - 15, 30, 30, 9);
+    bg.lineStyle(2, 0xffffff, 0.6);
+    bg.strokeRoundedRect(x - 15, y - 15, 30, 30, 9);
+
+    this.muteButtonText = this.add.text(x, y, this.sound.mute ? '🔇' : '🔊', {
+      font: '17px sans-serif'
+    }).setOrigin(0.5);
+
+    let zone = this.add.zone(x, y, 30, 30).setInteractive();
+    zone.on('pointerdown', () => {
+      this.sound.mute = !this.sound.mute;
+      this.muteButtonText.setText(this.sound.mute ? '🔇' : '🔊');
+      try { localStorage.setItem(MUTE_STORAGE_KEY, this.sound.mute ? '1' : '0'); } catch (e) { /* 저장 불가 시 무시 */ }
+    });
+  }
+
+  createRulesButton(gameWidth) {
+    const x = gameWidth - 20, y = 63;
+
+    let bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.5);
+    bg.fillRoundedRect(x - 15, y - 15, 30, 30, 9);
+    bg.lineStyle(2, 0xffffff, 0.6);
+    bg.strokeRoundedRect(x - 15, y - 15, 30, 30, 9);
+
+    this.add.text(x, y, '📖', { font: '16px sans-serif' }).setOrigin(0.5);
+
+    let zone = this.add.zone(x, y, 30, 30).setInteractive();
+    zone.on('pointerdown', () => this.showRulesPopup());
+  }
+
+  createRulesPopup(gameWidth) {
+    this.rulesContainer = this.add.container(0, 0).setDepth(90).setVisible(false);
+
+    let overlay = this.add.graphics();
+    overlay.fillStyle(0x1a0f08, 0.9);
+    overlay.fillRect(0, 0, gameWidth, 800);
+    this.rulesContainer.add(overlay);
+
+    let card = this.add.graphics();
+    card.fillStyle(0x2b1b0e, 0.97);
+    card.fillRoundedRect(gameWidth / 2 - 175, 130, 350, 540, 16);
+    card.lineStyle(3, 0xd4a017, 0.8);
+    card.strokeRoundedRect(gameWidth / 2 - 175, 130, 350, 540, 16);
+    this.rulesContainer.add(card);
+
+    this.rulesContainer.add(
+      this.add.text(gameWidth / 2, 155, '게임 규칙', {
+        font: 'bold 24px sans-serif', fill: '#ffd700', stroke: '#000000', strokeThickness: 3
+      }).setOrigin(0.5)
+    );
+
+    const rulesText = [
+      '· 인접한 칸끼리 자유롭게 이어서(꺾어도 OK) 3글자 이상 단어를 만드세요',
+      '· 점수 = 글자수 + 사용한 글자의 희귀도 (Q,X,Z 등 희귀 글자일수록 고득점)',
+      '',
+      '🔥 불타는 타일 - 단어를 제출할 때마다 한 칸씩 아래로 번짐.',
+      '   그 타일을 단어에 포함시켜 쓰면 즉시 꺼짐!',
+      '   바닥 줄에 닿으면 게임오버 — 3글자(최소길이) 단어를 만들면',
+      '   무작위 타일에 새 불씨가 붙어요',
+      '',
+      '💎 젬 (3글자) - 고정 보너스 점수',
+      '🐢 진주 (4글자) - 단어 점수 ×2',
+      '🪸 산호 (5글자) - 단어에 쓰면 불타는 타일 하나를 즉시 진화',
+      '💣 폭탄 (6글자) - 주변 3×3 파괴',
+      '💥 완전 리셋 (7글자+) - 보드 전체 새로 채움 (불도 모두 꺼짐)',
+      '',
+      '레벨업 시 현재 불타는 타일이 전부 진화됩니다'
+    ].join('\n');
+
+    this.rulesContainer.add(
+      this.add.text(gameWidth / 2, 190, rulesText, {
+        font: '14px sans-serif', fill: '#f4e4c1', align: 'left', lineSpacing: 6,
+        wordWrap: { width: 310 }
+      }).setOrigin(0.5, 0)
+    );
+
+    let closeBtn = this.add.container(gameWidth / 2, 655);
+    let closeBg = this.add.graphics();
+    closeBg.fillStyle(0xb7472a, 1);
+    closeBg.fillRoundedRect(-70, -20, 140, 40, 10);
+    closeBg.lineStyle(2, 0xffffff, 0.9);
+    closeBg.strokeRoundedRect(-70, -20, 140, 40, 10);
+    closeBtn.add(closeBg);
+    closeBtn.add(this.add.text(0, 0, '닫기', { font: 'bold 16px sans-serif', fill: '#ffffff' }).setOrigin(0.5));
+
+    let closeZone = this.add.zone(0, 0, 140, 40).setInteractive();
+    closeZone.on('pointerdown', () => this.hideRulesPopup());
+    closeBtn.add(closeZone);
+    this.rulesContainer.add(closeBtn);
+  }
+
+  showRulesPopup() {
+    if (this.isGameOver || this.isBoardBusy) return;
+    this.isPaused = true;
+    this.rulesContainer.setVisible(true);
+  }
+
+  hideRulesPopup() {
+    this.rulesContainer.setVisible(false);
+    this.isPaused = false;
+  }
+
+  // 마스코트 옆 말풍선 UI (단어 뜻 표시용)
+  createWordBubble() {
+    this.wordBubbleContainer = this.add.container(0, 0).setDepth(50).setVisible(false).setAlpha(0);
+
+    let bg = this.add.graphics();
+    bg.fillStyle(0xf4e4c1, 0.97);
+    bg.fillRoundedRect(170, 70, 295, 105, 16);
+    bg.fillTriangle(170, 107, 170, 133, 144, 121);
+    bg.lineStyle(2, 0xb7472a, 1);
+    bg.strokeRoundedRect(170, 70, 295, 105, 16);
+    this.wordBubbleContainer.add(bg);
+
+    this.wordBubbleTitle = this.add.text(186, 79, '', {
+      font: 'bold 19px sans-serif', fill: '#2b1b0e'
+    }).setOrigin(0, 0);
+    this.wordBubbleContainer.add(this.wordBubbleTitle);
+
+    this.wordBubbleDesc = this.add.text(186, 105, '', {
+      font: '14px sans-serif', fill: '#3d2817', align: 'left', lineSpacing: 3,
+      wordWrap: { width: 264 }
+    }).setOrigin(0, 0);
+    this.wordBubbleContainer.add(this.wordBubbleDesc);
+  }
+
+  truncateDefinition(def) {
+    if (!def) return 'No definition found.';
+    const MAX_LEN = 120;
+    return def.length > MAX_LEN ? def.slice(0, MAX_LEN).trim() + '...' : def;
+  }
+
+  showWordMeaning(word) {
+    const requestId = ++this.wordBubbleRequestId;
+    this.wordBubbleTitle.setText(word);
+    this.wordBubbleDesc.setText('...');
+    if (this.wordBubbleHideTimer) { this.wordBubbleHideTimer.remove(false); this.wordBubbleHideTimer = null; }
+    this.tweens.killTweensOf(this.wordBubbleContainer);
+    this.wordBubbleContainer.setVisible(true).setAlpha(1);
+
+    const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timeoutId = setTimeout(() => { if (controller) controller.abort(); }, 4000);
+
+    fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word.toLowerCase()}`, controller ? { signal: controller.signal } : undefined)
+      .then(res => { if (!res.ok) throw new Error('not found'); return res.json(); })
+      .then(data => {
+        clearTimeout(timeoutId);
+        if (requestId !== this.wordBubbleRequestId) return;
+        const def = data[0] && data[0].meanings && data[0].meanings[0] && data[0].meanings[0].definitions[0];
+        this.wordBubbleDesc.setText(this.truncateDefinition(def && def.definition));
+        this.startBubbleHideTimer();
+      })
+      .catch(() => {
+        clearTimeout(timeoutId);
+        if (requestId !== this.wordBubbleRequestId) return;
+        this.wordBubbleDesc.setText('No definition found.');
+        this.startBubbleHideTimer();
+      });
+  }
+
+  startBubbleHideTimer() {
+    this.wordBubbleHideTimer = this.time.delayedCall(5000, () => {
+      this.tweens.add({
+        targets: this.wordBubbleContainer, alpha: 0, duration: 300,
+        onComplete: () => this.wordBubbleContainer.setVisible(false)
+      });
+    });
+  }
+
+  hideWordBubble() {
+    this.wordBubbleRequestId++;
+    if (this.wordBubbleHideTimer) { this.wordBubbleHideTimer.remove(false); this.wordBubbleHideTimer = null; }
+    this.tweens.killTweensOf(this.wordBubbleContainer);
+    this.wordBubbleContainer.setVisible(false).setAlpha(0);
+  }
+
+  showFloatingText(x, y, text, color) {
+    let ft = this.add.text(x, y, text, {
+      font: 'bold 22px sans-serif', fill: color, stroke: '#000000', strokeThickness: 3
+    }).setOrigin(0.5);
+
+    this.tweens.add({
+      targets: ft, y: y - 40, alpha: 0, duration: 1200, ease: 'Power1',
+      onComplete: () => ft.destroy()
+    });
+  }
+
+  showWordQualityPopup(word, x, y) {
+    const tierKey = Math.min(7, word.length);
+    const tier = WORD_QUALITY_TIERS[tierKey];
+    if (!tier) return;
+
+    this.playSfx(tier.sfx);
+
+    const txt = this.add.text(x, y, tier.label, {
+      fontFamily: '"Luckiest Guy"', fontSize: tier.fontSize + 'px',
+      fill: tier.color, stroke: '#000000', strokeThickness: Math.max(4, Math.round(tier.fontSize / 7))
+    }).setOrigin(0.5).setScale(0.3).setAlpha(0).setDepth(60);
+
+    this.tweens.add({
+      targets: txt, scale: 1, alpha: 1, duration: 220, ease: 'Back.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: txt, y: y - 50, alpha: 0, duration: 700, delay: 350, ease: 'Power1',
+          onComplete: () => txt.destroy()
+        });
+      }
+    });
+
+    if (tier.sparkle) this.spawnSparks(x, y);
+    if (tier.shake) this.cameras.main.shake(140, 0.006);
+  }
+
+  submitWord() {
+    if (this.isPaused || this.isGameOver || this.isBoardBusy) return;
+
+    const word = this.selectedPath.map(t => t.letter).join('');
+    if (word.length < 3) return;
+
+    if (dictionary.has(word)) {
+      // 1. 선택된 타일들의 특수 효과 집계 (젬/진주/폭탄/산호) + 불타는 타일 포함 여부
+      let flatBonus = 0;
+      let scoreMultiplier = 1;
+      let coralUses = 0;
+      const bombTiles = [];
+      const usedBurning = new Set();
+
+      this.selectedPath.forEach(t => {
+        if (t.type === 'gem') flatBonus += GEM_BONUS_SCORE;
+        else if (t.type === 'pearl') scoreMultiplier = 2;
+        else if (t.type === 'bomb') { flatBonus += BOMB_BONUS_SCORE; bombTiles.push(t); }
+        else if (t.type === 'coral') coralUses++;
+        if (t.burning) usedBurning.add(t);
+      });
+
+      // 2. 점수: 글자수 기본점 + 글자 희귀도(스크래블식) 반영
+      const rarityScore = letterRarityValue(word);
+      const addedScore = (word.length * LENGTH_SCORE_PER_LETTER + rarityScore * RARITY_SCORE_PER_POINT + flatBonus) * scoreMultiplier;
+      this.score += addedScore;
+      this.scoreText.setText(`SCORE: ${this.score}`);
+      this.sessionWordLog.push({ word, length: word.length, level: this.level, score: addedScore });
+
+      const lastTile = this.selectedPath[this.selectedPath.length - 1];
+      this.showFloatingText(lastTile.image.x, lastTile.image.y, `+${addedScore} (${word})`, '#00ffff');
+      this.showWordMeaning(word);
+      this.showWordQualityPopup(word, 240, 260);
+
+      // 3. 불타는 타일 처리: 이번 단어에 쓰인 건 소화, 나머지는 한 칸씩 번짐 (바닥 도달 시 게임오버)
+      const burnedDown = this.advanceBurningTiles(usedBurning);
+      if (burnedDown) return; // 게임오버는 triggerLibraryBurned 안에서 이미 처리됨
+
+      // 4. 최소 길이(3글자) 단어를 만들면 무작위 타일에 새 불씨가 붙음
+      if (word.length === BURN_IGNITE_WORD_LENGTH) this.igniteRandomTile();
+
+      // 5. 산호: 물로 불을 끈다는 테마 - 사용한 개수만큼 무작위 불타는 타일을 추가로 소화
+      for (let i = 0; i < coralUses; i++) {
+        if (this.burningTiles.length === 0) break;
+        const target = this.burningTiles[Math.floor(Math.random() * this.burningTiles.length)];
+        this.showFloatingText(target.image.x, target.image.y, '🪸 진화!', '#7dffb3');
+        this.extinguishTile(target);
+      }
+
+      // 6. 폭탄: 주변 3x3 함께 파괴
+      let blastExtra = [];
+      if (bombTiles.length > 0) {
+        const already = new Set(this.selectedPath);
+        bombTiles.forEach(bomb => {
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              const nr = bomb.r + dr, nc = bomb.c + dc;
+              if (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE) {
+                const t = this.board[nr][nc];
+                if (t && !already.has(t) && !blastExtra.includes(t)) blastExtra.push(t);
+              }
+            }
+          }
+        });
+        this.cameras.main.shake(120, 0.005);
+        this.showFloatingText(bombTiles[0].image.x, bombTiles[0].image.y, '💥 폭발!', '#ff9d4d');
+      }
+
+      // 7. 3/4/5/6글자 단어마다 매번 보너스 타일 지급, 7글자 이상은 보드 완전 리셋
+      let pendingBonusType = null;
+      let triggerFullReset = false;
+      if (word.length >= 7) triggerFullReset = true;
+      else if (word.length === 6) pendingBonusType = 'bomb';
+      else if (word.length === 5) pendingBonusType = 'coral';
+      else if (word.length === 4) pendingBonusType = 'pearl';
+      else if (word.length === 3) pendingBonusType = 'gem';
+      if (pendingBonusType) {
+        this.showFloatingText(240, 200, '✨ 보너스 타일 획득!', '#ffe600');
+      }
+
+      // 8. 레벨업 판정 (한 단어로 여러 레벨을 넘을 수도 있으므로 while로 처리)
+      const levelBeforeUp = this.level;
+      let leveledUp = false;
+      while (this.level < LEVEL_CAP && this.score >= this.targetScore) {
+        this.level++;
+        this.levelIncrement = Math.round(this.levelIncrement * LEVEL_INCREMENT_MULTIPLIER / 50) * 50;
+        this.targetScore += this.levelIncrement;
+        leveledUp = true;
+      }
+      if (leveledUp) {
+        this.levelText.setText(`LV: ${this.level}`);
+        this.showLevelUpPopup(this.level);
+        if (Math.floor(this.level / 10) > Math.floor(levelBeforeUp / 10)) {
+          this.rebalanceLetterTiles();
+        }
+      }
+      this.updateLevelProgressBar(480);
+
+      const matchedTiles = this.selectedPath.concat(blastExtra);
+      this.selectedPath = [];
+      this.wordText.setText('-');
+      if (triggerFullReset) {
+        this.triggerFullBoardReset();
+      } else {
+        this.removeAndRefill(matchedTiles, pendingBonusType);
+      }
+    } else {
+      this.tweens.add({
+        targets: this.wordText, x: '+=6', duration: 40, yoyo: true, repeat: 3,
+        onComplete: () => this.clearSelection()
+      });
+    }
+  }
+}
+
+const config = {
+  type: Phaser.AUTO,
+  width: 480,
+  height: 800,
+  parent: 'game-container',
+  scene: MainScene
+};
+
+// 사전은 이름 입력을 기다리는 동안 미리 불러오기 시작
+const dictionaryReady = loadDictionary();
+renderLeaderboardPreview();
+
+function beginGame() {
+  const input = document.getElementById('name-input');
+  const raw = input.value.trim();
+  PLAYER_NAME = (raw || '서생').slice(0, 10);
+
+  const overlay = document.getElementById('name-overlay');
+  const startBtn = document.getElementById('start-btn');
+  startBtn.disabled = true;
+  startBtn.textContent = '불러오는 중...';
+
+  dictionaryReady.then(() => {
+    overlay.style.display = 'none';
+    window.game = new Phaser.Game(config);
+  });
+}
+
+document.getElementById('start-btn').addEventListener('click', beginGame);
+document.getElementById('name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') beginGame();
+});
+</script>
+</body>
+</html>
