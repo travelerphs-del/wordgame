@@ -2,5 +2,6 @@
 .vscode/
 .claude/
 
-# 타일 크롭 전 원본 백업 (게임에서 실제로 쓰이지 않음, 용량만 큼)
+# 타일 크롭 전 원본 백업 (게임에서 실제로 쓰이지 않음, 용량만 큼). V1(assets/)과 V2(v2/assets/) 둘 다 해당
 assets/originals/
+v2/assets/originals/
