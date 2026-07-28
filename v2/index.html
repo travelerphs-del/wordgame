@@ -1482,6 +1482,13 @@ function beginGame() {
   dictionaryReady.then(() => {
     overlay.style.display = 'none';
     window.game = new Phaser.Game(config);
+
+    // 폴더블 기기가 접힌/펼친 화면을 전환할 때 표준 window resize 이벤트가
+    // 안정적으로 발생하지 않는 경우가 있어, visualViewport 쪽도 함께 감지해서
+    // 스케일 매니저를 강제로 재계산시킴 (이전 화면 크기로 캔버스가 남아 잘리는 것 방지)
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => window.game.scale.refresh());
+    }
   });
 }
 
