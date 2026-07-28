@@ -1,5 +1,20 @@
 # Dev Log
 
+## 2026-07-25 (2차: 갤럭시 S26 Ultra 등에서 화면 잘림 수정)
+
+위 항목(까만 화면) 배포 직후, 사용자 지인의 갤럭시 S26 Ultra에서는 로딩은 되지만 보드 오른쪽/HUD 일부가 화면 밖으로 잘려 보인다는 제보(사용자 본인 폴드7은 펼침/접힘 둘 다 문제없었음 — 기기별 CSS 뷰포트 폭 차이).
+
+- **원인**: Phaser `config`에 `width:480, height:800`만 있고 `scale` 설정이 없어서, 캔버스가 항상 고정 480×800 픽셀로 생성됨. `#game-wrap`/`#game-container`는 CSS로 반응형(`max-width:480px` 등)이었지만 캔버스 자체는 그 안에서 늘어나거나 줄어들지 않고 그냥 넘쳐서(`body{overflow:hidden}`) 뷰포트보다 캔버스가 넓은 기기에서는 오른쪽/아래가 그대로 잘려 보였음.
+- **수정**: `config.scale`에 `mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH` 추가. 캔버스가 부모 컨테이너 크기에 맞춰 비율 유지하며 자동으로 축소/중앙정렬됨. 브라우저 창을 390×844(뷰포트 폭이 캔버스보다 좁은 경우)로 좁혀 재현 후 수정 확인 — 보드/HUD 전체가 잘림 없이 축소되어 보이고, Scale Manager가 입력 좌표도 자동 보정해줘서 축소된 화면에서 타일 클릭도 정확히 원래 타일에 맞음.
+
+## 2026-07-25 (까만 화면 버그 수정: 애셋 용량 26.75MB→~2MB, BGM 5곡 랜덤 재생 추가)
+
+사용자 본인 및 지인 안드로이드 폰에서 게임 접속 시 까만 화면만 뜨고 아무것도 안 된다는 제보.
+
+- **원인 진단**: `preload()`에서 무조건 불러오는 배경 10장(각 816×1456, RGB PNG) + 타일 9종(각 최대 823×876, RGBA PNG)이 실제 표시 크기(배경 480×800, 타일 56×56)보다 훨씬 큰 원본 해상도를 압축 없이 그대로 쓰고 있어서 합계 **26.75MB**에 달했음. `window.game.scene.scenes[0].load`로 로더 내부 상태를 직접 조회해보니 데스크톱에서도 로딩이 매우 느리게(수 초~수십 초) 진행되다 `create()`가 자동으로 걸리지 않는 경우가 있었고, 저사양 모바일 네트워크/기기에서는 사실상 영구히 로딩이 끝나지 않아 씬이 `LOADING/CREATING` 상태에 멈춰 캔버스가 까맣게 보이는 것으로 결론.
+- **애셋 최적화**: PIL로 배경 10장은 720×1200으로 리사이즈 후 JPEG(quality 82)로 재저장(`bg_sea_N.png`→`bg_sea_N.jpg`, 평균 1.5MB→~90KB), 타일 9종은 긴 변 기준 224px로 리사이즈해 RGBA PNG 재저장(평균 1.1MB→~106KB), `dolphin.png`도 1024px→320px로 축소(588KB→67KB). 리사이즈 전 원본은 전부 `assets/originals/*_preoptimize.png`로 로컬 백업(기존 크롭 백업과 동일한 관례, git에는 포함 안 됨). 총 preload 용량 **26.75MB → 약 1.94MB**(약 13배 감소). `index.html`의 배경 로드 경로를 `.png`→`.jpg`로 변경하고, 절대 크기(`setScale`)로 그리던 돌고래를 `setDisplaySize(236,236)`로 바꿔 원본 해상도가 바뀌어도 화면 크기가 그대로 유지되게 함(타일/배경은 원래도 `setDisplaySize` 기반이라 영향 없었음).
+- **배경음악(BGM) 5곡 무작위 재생 추가**: `assets/bgm_1~5.mp3`(각 2~3MB)를 사용자가 새로 추가. 용량이 커서 `preload()`에 넣으면 방금 고친 문제가 재발하므로, `create()`에서 보드가 뜬 뒤 `startBackgroundMusic()`으로 5곡 중 무작위 1곡만 별도로(`this.load.audio` + `this.load.start()`) 비동기로 불러와 루프 재생. 기존 음소거 버튼(`this.sound.mute`)이 SFX와 동일하게 자동으로 BGM도 함께 음소거함(Phaser SoundManager 레벨 전역 설정이라 별도 연동 코드 불필요).
+
 ## 2026-07-24 (V2 신규 개발: 원작 Bookworm 스타일 "불타는 타일" 게임)
 
 V1을 실제 PopCap 원작 Bookworm/Bookworm Adventures와 비교 조사한 결과를 바탕으로, V1(`index.html`)은 전혀 건드리지 않고 `v2/index.html`에 완전히 새 게임을 만듦. 같은 git 저장소/GitHub Pages/Termux 인프라를 그대로 재사용(`v2/` 경로로 추가 배포).
