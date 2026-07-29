@@ -9,8 +9,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
   <style>
-    body { margin: 0; padding: 0; background-color: #1a0f08; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    #game-wrap { position: relative; width: 100%; max-width: 480px; height: 100vh; max-height: 800px; }
+    body { margin: 0; padding: 0; background-color: #1a0f08; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 100vh; min-height: 100dvh; }
+    #game-wrap { position: relative; width: 100%; max-width: 480px; height: 100vh; height: 100dvh; max-height: 800px; }
     #game-container { width: 100%; height: 100%; }
 
     #name-overlay {
@@ -1482,15 +1482,30 @@ function beginGame() {
   dictionaryReady.then(() => {
     overlay.style.display = 'none';
     window.game = new Phaser.Game(config);
-
-    // 폴더블 기기가 접힌/펼친 화면을 전환할 때 표준 window resize 이벤트가
-    // 안정적으로 발생하지 않는 경우가 있어, visualViewport 쪽도 함께 감지해서
-    // 스케일 매니저를 강제로 재계산시킴 (이전 화면 크기로 캔버스가 남아 잘리는 것 방지)
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', () => window.game.scale.refresh());
-    }
+    syncGameWrapSize();
   });
 }
+
+// #game-wrap의 크기를 CSS 뷰포트 단위(vh/dvh)에 기대지 않고 매번 JS로 직접 재계산해서 강제 적용.
+// 폴더블 기기가 접힌/펼친 화면을 전환할 때 100vh/100dvh 값 자체가 갱신되지 않고 예전 크기로
+// 남아있는 경우가 있어(OS가 화면 자체를 바꾸는 상황이라 브라우저 리플로우가 안 따라오는 경우),
+// scale.refresh()만으론 소용없음 — visualViewport의 실측 픽셀값으로 컨테이너를 직접 고정시킨 뒤
+// 그 기준으로 Phaser를 재계산시킴.
+function syncGameWrapSize() {
+  const vw = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const wrap = document.getElementById('game-wrap');
+  wrap.style.width = Math.min(vw, 480) + 'px';
+  wrap.style.height = Math.min(vh, 800) + 'px';
+  if (window.game) window.game.scale.refresh();
+}
+
+window.addEventListener('resize', syncGameWrapSize);
+window.addEventListener('orientationchange', syncGameWrapSize);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', syncGameWrapSize);
+}
+syncGameWrapSize();
 
 document.getElementById('start-btn').addEventListener('click', beginGame);
 document.getElementById('name-input').addEventListener('keydown', (e) => {
