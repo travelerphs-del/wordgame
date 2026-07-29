@@ -97,6 +97,8 @@ const BOMB_BONUS_SCORE = 500;
 
 // 불타는 타일: 이 길이 이하(=최소 길이)의 "나쁜 단어"를 만들면 새 불씨가 붙음
 const BURN_IGNITE_WORD_LENGTH = 3;
+// 불타는 타일 심각도 단계 수 (스프라이트 애니메이션 프레임셋 개수와 일치)
+const MAX_BURN_SEVERITY = 3;
 
 // 보너스타일: 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
 const BONUS_MILESTONES = [
@@ -246,6 +248,14 @@ class MainScene extends Phaser.Scene {
       this.load.image('bg_library_' + i, `assets/bg_library_${i}.png`);
     }
 
+    // 불타는 타일 애니메이션: 심각도 3단계 x 4프레임. 아직 파일이 없어도(404) 게임이
+    // 죽지 않도록, 실제 등록/재생 시점에 textures.exists로 가드함 (create() 참고)
+    for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
+      for (let f = 1; f <= 4; f++) {
+        this.load.image(`burn${stage}_f${f}`, `assets/burn_stage${stage}_${f}.png`);
+      }
+    }
+
     // 사운드 (V1과 같은 파일명 규칙이라 원한다면 같은 mp3를 그대로 복사해도 동작함)
     this.load.audio('sfx_tile_select_1', 'assets/sfx_tile_select_1.mp3');
     this.load.audio('sfx_tile_select_2', 'assets/sfx_tile_select_2.mp3');
@@ -355,6 +365,23 @@ class MainScene extends Phaser.Scene {
     const GAME_WIDTH = 480;
 
     try { this.sound.mute = localStorage.getItem(MUTE_STORAGE_KEY) === '1'; } catch (e) { /* localStorage 사용 불가 시 무시 */ }
+
+    // 불타는 타일 애니메이션 등록 (4프레임/2fps = 2초 루프). 프레임 PNG가 아직 없으면(404로
+    // 로드 실패) 그 단계는 등록을 건너뜀 - igniteTile()/advanceBurningTiles()가 anims.exists로
+    // 가드해서 애니메이션 대신 단순 틴트로 폴백함
+    for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
+      const frames = [1, 2, 3, 4]
+        .map(f => `burn${stage}_f${f}`)
+        .filter(key => this.textures.exists(key) && this.textures.get(key).key !== '__MISSING');
+      if (frames.length > 0) {
+        this.anims.create({
+          key: 'burn_stage_' + stage,
+          frames: frames.map(key => ({ key })),
+          frameRate: 2,
+          repeat: -1
+        });
+      }
+    }
 
     // 1. 배경
     this.bgTier = 0;
@@ -574,11 +601,14 @@ class MainScene extends Phaser.Scene {
 
         const x = this.boardStartX + c * this.tileSizeWithGap;
         const y = this.boardStartY + r * this.tileSizeWithGap;
+        // 애니메이션 재생 중이었으면 stop()을 먼저 해야 setTexture가 다음 틱에 덮어써지지 않음
+        tileObj.image.stop();
         tileObj.image.setPosition(x, y).setDisplaySize(tileObj.baseSize, tileObj.baseSize).setAlpha(1).clearTint().setTexture(this.tileKey);
         tileObj.text.setPosition(x, y).setScale(1).setAlpha(1);
 
         tileObj.type = 'normal';
         tileObj.burning = false;
+        tileObj.burnSeverity = 0;
 
         tileObj.letter = LETTER_POOL[Math.floor(Math.random() * LETTER_POOL.length)];
         tileObj.text.setText(tileObj.letter);
@@ -753,7 +783,7 @@ class MainScene extends Phaser.Scene {
 
   // === 불타는 타일 시스템 ===================================================
 
-  // 무작위 일반 타일 하나에 새로 불을 붙임 (이미 불타는 타일은 후보에서 제외)
+  // 무작위 일반 타일 하나에 새로 불을 붙임 (이미 불타는 타일/보너스 타일은 후보에서 제외)
   igniteRandomTile() {
     const candidates = [];
     for (let r = 0; r < GRID_SIZE; r++) {
@@ -763,79 +793,83 @@ class MainScene extends Phaser.Scene {
       }
     }
     if (candidates.length === 0) return;
+    this.igniteTile(candidates[Math.floor(Math.random() * candidates.length)]);
+  }
 
-    const tile = candidates[Math.floor(Math.random() * candidates.length)];
+  // 특정 타일 하나에 불을 붙임 (발화/확산 공용). 애니메이션 프레임이 아직 없으면
+  // (에셋 전달 전) 심각도에 맞는 단색 틴트로 폴백해서 최소한 "불타는 중"임은 보이게 함
+  igniteTile(tile) {
     tile.burning = true;
+    tile.burnSeverity = 1;
     this.burningTiles.push(tile);
-    this.updateBurnVisual(tile);
+    this.applyBurnVisual(tile);
     this.playSfx('sfx_fire_crackle');
   }
 
-  // 불 상태 시각 표시: 바닥에 가까울수록(row가 클수록) 노랑->빨강으로 짙어지고 깜빡임도 빨라짐
-  updateBurnVisual(tile) {
-    this.tweens.killTweensOf(tile.image);
-    if (!tile.burning) {
+  applyBurnVisual(tile) {
+    const animKey = 'burn_stage_' + tile.burnSeverity;
+    if (this.anims.exists(animKey)) {
+      this.tweens.killTweensOf(tile.image);
       tile.image.clearTint().setAlpha(1);
-      return;
+      tile.image.play(animKey);
+    } else {
+      // 폴백: 프레임 에셋 도착 전까지 심각도별 단색 틴트 + 깜빡임
+      this.tweens.killTweensOf(tile.image);
+      const tints = [0xffd700, 0xff8c00, 0xff2200];
+      tile.image.setTint(tints[tile.burnSeverity - 1] || tints[tints.length - 1]);
+      this.tweens.add({ targets: tile.image, alpha: 0.55, duration: 300, yoyo: true, repeat: -1 });
     }
-    const pct = (GRID_SIZE <= 1) ? 1 : tile.r / (GRID_SIZE - 1);
-    const from = { r: 255, g: 214, b: 0 };
-    const to = { r: 255, g: 20, b: 0 };
-    const r = Math.round(from.r + (to.r - from.r) * pct);
-    const g = Math.round(from.g + (to.g - from.g) * pct);
-    const b = Math.round(from.b + (to.b - from.b) * pct);
-    tile.image.setTint((r << 16) | (g << 8) | b);
-    this.tweens.add({
-      targets: tile.image, alpha: 0.55, duration: 350 - pct * 200, yoyo: true, repeat: -1
-    });
   }
 
   extinguishTile(tile) {
     tile.burning = false;
+    tile.burnSeverity = 0;
     this.burningTiles = this.burningTiles.filter(t => t !== tile);
     this.tweens.killTweensOf(tile.image);
-    tile.image.clearTint().setAlpha(1);
+    tile.image.stop();
+    tile.image.setTexture(TILE_TEXTURE[tile.type] || this.tileKey).clearTint().setAlpha(1);
     this.playSfx('sfx_extinguish');
   }
 
-  // 매 단어 제출마다 호출: usedSet에 포함된 불타는 타일은 소화하고, 나머지는 한 칸씩 아래로 번짐.
-  // 번지다가 바닥 줄에 닿으면 즉시 게임오버. 반환값: 이 호출로 게임오버가 트리거됐는지 여부
+  // 8방향 인접 타일 목록
+  getAdjacentTiles(tile) {
+    const result = [];
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        const nr = tile.r + dr, nc = tile.c + dc;
+        if (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE) result.push(this.board[nr][nc]);
+      }
+    }
+    return result;
+  }
+
+  // 매 단어 제출마다 호출: usedSet에 포함된 불타는 타일은 소화. 1턴을 넘긴(=이번에 새로 안 붙은)
+  // 불타는 타일은 심각도를 1단계 올리고, 주변 8칸 중 정상 타일 1개에만 옮겨붙음.
+  // 보드 전체(64칸)가 다 불타면 게임오버. 반환값: 이 호출로 게임오버가 트리거됐는지 여부
   advanceBurningTiles(usedSet) {
     this.burningTiles.slice().forEach(tile => {
       if (usedSet.has(tile)) this.extinguishTile(tile);
     });
 
-    // 바닥에 가까운 것부터 처리해야 서로 위치가 꼬이지 않음
-    const creeping = this.burningTiles.slice().sort((a, b) => b.r - a.r);
-    for (const tile of creeping) {
-      if (!tile.burning) continue; // 방금 소화됨
+    const freshlyIgnited = new Set();
+    this.burningTiles.slice().forEach(tile => {
+      if (!tile.burning || freshlyIgnited.has(tile)) return;
 
-      if (tile.r >= GRID_SIZE - 1) {
-        this.triggerLibraryBurned();
-        return true;
+      tile.burnSeverity = Math.min(tile.burnSeverity + 1, MAX_BURN_SEVERITY);
+      this.applyBurnVisual(tile);
+
+      const candidates = this.getAdjacentTiles(tile).filter(t => t && t.type === 'normal' && !t.burning);
+      if (candidates.length > 0) {
+        const target = candidates[Math.floor(Math.random() * candidates.length)];
+        this.igniteTile(target);
+        freshlyIgnited.add(target);
       }
+    });
 
-      const belowTile = this.board[tile.r + 1][tile.c];
-      const tr = tile.r, tc = tile.c;
-      const br = belowTile.r, bc = belowTile.c;
-      this.board[tr][tc] = belowTile;
-      this.board[br][bc] = tile;
-      tile.r = br; tile.c = bc;
-      belowTile.r = tr; belowTile.c = tc;
-
-      const tileX = this.boardStartX + bc * this.tileSizeWithGap;
-      const tileY = this.boardStartY + br * this.tileSizeWithGap;
-      const belowX = this.boardStartX + tc * this.tileSizeWithGap;
-      const belowY = this.boardStartY + tr * this.tileSizeWithGap;
-      this.tweens.add({ targets: [tile.image, tile.text], x: tileX, y: tileY, duration: 260, ease: 'Sine.easeInOut' });
-      this.tweens.add({ targets: [belowTile.image, belowTile.text], x: belowX, y: belowY, duration: 260, ease: 'Sine.easeInOut' });
-
-      this.updateBurnVisual(tile);
-
-      if (tile.r === GRID_SIZE - 1) {
-        this.triggerLibraryBurned();
-        return true;
-      }
+    if (this.burningTiles.length >= GRID_SIZE * GRID_SIZE) {
+      this.triggerLibraryBurned();
+      return true;
     }
     return false;
   }
@@ -843,7 +877,7 @@ class MainScene extends Phaser.Scene {
   triggerLibraryBurned() {
     if (this.isGameOver) return;
     this.cameras.main.shake(280, 0.012);
-    this.showGameOverPopup('🔥 서재가 불타버렸습니다!');
+    this.showGameOverPopup('🔥 서재 전체가 불타버렸습니다!');
   }
 
   // 10레벨마다 호출: 보너스 타일은 그대로 두고, 일반 타일들의 글자만
@@ -909,14 +943,16 @@ class MainScene extends Phaser.Scene {
     const textureKey = (this.textures.exists(TILE_TEXTURE[type]) && this.textures.get(TILE_TEXTURE[type]).key !== '__MISSING')
                         ? TILE_TEXTURE[type] : this.tileKey;
 
-    let tileImage = this.add.image(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
+    // Sprite로 생성(Image의 상위호환) — 평소엔 정적 텍스처 한 장을 보여주다가, 불이 붙으면
+    // 같은 오브젝트에 .play()만 호출해서 애니메이션으로 전환함 (destroy/재생성 없음)
+    let tileImage = this.add.sprite(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
     let tileText = this.add.text(x, y, finalLetter, {
       font: 'bold 28px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
     }).setOrigin(0.5);
 
     let tileObj = {
       r, c, letter: finalLetter, image: tileImage, text: tileText, type,
-      baseSize: this.tileDisplaySize, burning: false
+      baseSize: this.tileDisplaySize, burning: false, burnSeverity: 0
     };
 
     tileImage.on('pointerdown', () => this.handleTileClick(tileObj));
@@ -1007,9 +1043,9 @@ class MainScene extends Phaser.Scene {
     tile.image.setTint(0x5be8ff);
   }
 
-  // 불타는 타일을 선택했다가 해제할 땐, 파란 선택 틴트가 아니라 불 틴트로 되돌려야 함
+  // 불타는 타일을 선택했다가 해제할 땐, 파란 선택 틴트가 아니라 불 비주얼로 되돌려야 함
   deselectTile(tile) {
-    if (tile.burning) this.updateBurnVisual(tile);
+    if (tile.burning) this.applyBurnVisual(tile);
     else tile.image.clearTint();
   }
 
