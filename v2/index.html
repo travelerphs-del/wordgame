@@ -99,6 +99,8 @@ const BOMB_BONUS_SCORE = 500;
 const BURN_IGNITE_WORD_LENGTH = 3;
 // 불타는 타일 심각도 단계 수 (스프라이트 애니메이션 프레임셋 개수와 일치)
 const MAX_BURN_SEVERITY = 3;
+// 심각도 단계별 애니메이션 프레임 수 (영상에서 균등 추출한 프레임 개수)
+const BURN_FRAMES_PER_STAGE = 6;
 
 // 보너스타일: 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
 const BONUS_MILESTONES = [
@@ -137,6 +139,7 @@ const SEED_WORDS = [
 
 // 오디오
 const SFX_VOLUME = 0.4;
+const BGM_VOLUME = 0.25; // 효과음보다 낮게 - 배경음이라 묻히면 안 되지만 방해되면 더 안 됨
 const MUTE_STORAGE_KEY = 'bookworm_v2_muted';
 
 // 단어 길이별 "품질" 팝업 (라벨/크기/사운드/연출강도) - 양피지->불꽃 색으로 테마에 맞춤
@@ -248,10 +251,10 @@ class MainScene extends Phaser.Scene {
       this.load.image('bg_library_' + i, `assets/bg_library_${i}.png`);
     }
 
-    // 불타는 타일 애니메이션: 심각도 3단계 x 4프레임. 아직 파일이 없어도(404) 게임이
-    // 죽지 않도록, 실제 등록/재생 시점에 textures.exists로 가드함 (create() 참고)
+    // 불타는 타일 애니메이션: 심각도 3단계 x 6프레임(영상에서 균등 추출). 아직 파일이
+    // 없어도(404) 게임이 죽지 않도록, 실제 등록/재생 시점에 textures.exists로 가드함 (create() 참고)
     for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
-      for (let f = 1; f <= 4; f++) {
+      for (let f = 1; f <= BURN_FRAMES_PER_STAGE; f++) {
         this.load.image(`burn${stage}_f${f}`, `assets/burn_stage${stage}_${f}.png`);
       }
     }
@@ -269,6 +272,7 @@ class MainScene extends Phaser.Scene {
     this.load.audio('sfx_fantastic', 'assets/sfx_fantastic.mp3');
     this.load.audio('sfx_fire_crackle', 'assets/sfx_fire_crackle.mp3'); // 새 불씨가 붙을 때 (선택)
     this.load.audio('sfx_extinguish', 'assets/sfx_extinguish.mp3'); // 불이 꺼질 때 (선택)
+    this.load.audio('bgm_1', 'assets/bgm_1.mp3');
   }
 
   // 로드된 사운드만 안전하게 재생 (파일이 아직 없어도 게임이 죽지 않도록)
@@ -366,11 +370,17 @@ class MainScene extends Phaser.Scene {
 
     try { this.sound.mute = localStorage.getItem(MUTE_STORAGE_KEY) === '1'; } catch (e) { /* localStorage 사용 불가 시 무시 */ }
 
-    // 불타는 타일 애니메이션 등록 (4프레임/2fps = 2초 루프). 프레임 PNG가 아직 없으면(404로
+    // 배경음악: Phaser.Game 생성 자체가 사용자의 "시작" 버튼 클릭 뒤에 일어나므로
+    // 브라우저 자동재생 정책과 충돌 없이 바로 재생 가능. this.sound.mute 토글이 이것도 함께 제어함
+    if (this.cache.audio.exists('bgm_1')) {
+      this.sound.add('bgm_1', { volume: BGM_VOLUME, loop: true }).play();
+    }
+
+    // 불타는 타일 애니메이션 등록 (6프레임/2fps = 3초 루프). 프레임 PNG가 아직 없으면(404로
     // 로드 실패) 그 단계는 등록을 건너뜀 - igniteTile()/advanceBurningTiles()가 anims.exists로
     // 가드해서 애니메이션 대신 단순 틴트로 폴백함
     for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
-      const frames = [1, 2, 3, 4]
+      const frames = Array.from({ length: BURN_FRAMES_PER_STAGE }, (_, i) => i + 1)
         .map(f => `burn${stage}_f${f}`)
         .filter(key => this.textures.exists(key) && this.textures.get(key).key !== '__MISSING');
       if (frames.length > 0) {
