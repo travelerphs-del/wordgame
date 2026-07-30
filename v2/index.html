@@ -90,6 +90,12 @@ function letterRarityValue(word) {
   for (const ch of word) total += LETTER_VALUES[ch] || 1;
   return total;
 }
+
+// 레벨업마다 새로 붙이는 불 개수: 5~9레벨=1개, 10~14=2개, 15~19=3개 ... 5레벨 구간마다 +1개씩 계속 증가
+function burnTilesPerLevelUp(level) {
+  if (level < 5) return 0;
+  return Math.floor((level - 5) / 5) + 1;
+}
 const LENGTH_SCORE_PER_LETTER = 50;
 const RARITY_SCORE_PER_POINT = 20;
 const GEM_BONUS_SCORE = 200;
@@ -104,9 +110,9 @@ const FLAME_FRAME_COUNT = 6;
 // 심각도별 불꽃 오버레이 크기/진하기 - 베이스 텍스처가 이미 "얼마나 탔는지"를 보여주므로
 // 불꽃은 심각도별로 새로 그리지 않고 하나를 재사용, 크기/알파만 단계적으로 키움
 const FLAME_OVERLAY_BY_SEVERITY = {
-  1: { scale: 0.55, alpha: 0.6 },
-  2: { scale: 0.8, alpha: 0.85 },
-  3: { scale: 1.05, alpha: 1 }
+  1: { scale: 0.85, alpha: 0.55 },
+  2: { scale: 0.95, alpha: 0.8 },
+  3: { scale: 1.0, alpha: 1 }
 };
 
 // 보너스타일: 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
@@ -529,12 +535,9 @@ class MainScene extends Phaser.Scene {
     this.popupContainer.add(popupBtn);
   }
 
-  // 레벨업 보상: 화면 중앙에 1초간 플래시 텍스트 + 현재 불타는 타일을 전부 진화시킴
-  // (원작처럼 "실력이 곧 안전"이 되도록 - 타이머 리필 대신 이걸로 대체)
+  // 레벨업 보상: 화면 중앙에 1초간 플래시 텍스트. 불타는 타일은 더 이상 자동으로 안 꺼짐
+  // (난이도 유지를 위해 삭제됨 - submitWord()의 레벨업 처리부에서 오히려 새 불을 추가함)
   showLevelUpPopup(newLevel) {
-    const hadBurning = this.burningTiles.length > 0;
-    this.burningTiles.slice().forEach(t => this.extinguishTile(t));
-
     this.setBackgroundTier(Math.min(BG_TIER_COUNT, Math.floor((newLevel - 1) / BG_TIER_LEVEL_SPAN) + 1));
 
     if (this.levelFlashText) { this.tweens.killTweensOf(this.levelFlashText); this.levelFlashText.destroy(); }
@@ -554,8 +557,6 @@ class MainScene extends Phaser.Scene {
         });
       }
     });
-
-    if (hadBurning) this.showFloatingText(240, 400, '🧯 레벨업! 불이 모두 꺼졌습니다', '#7dffd0');
   }
 
   showGameOverPopup(reason) {
@@ -914,8 +915,9 @@ class MainScene extends Phaser.Scene {
     this.showGameOverPopup('🔥 서재 전체가 불타버렸습니다!');
   }
 
-  // 10레벨마다 호출: 보너스 타일은 그대로 두고, 일반 타일들의 글자만
-  // LETTER_POOL의 실제 모음/자음 비율에 맞춰 다시 뽑아 배정
+  // 매 레벨업마다 호출: 보너스/불타는 타일은 그대로 두고(타입·화재 상태 불변), 일반 타일들의
+  // 글자만 LETTER_POOL의 실제 모음/자음 비율에 맞춰 다시 뽑아 배정 - 후반부에 글자 편중으로
+  // 단어를 못 만드는 문제 방지
   rebalanceLetterTiles() {
     const normalTiles = [];
     for (let r = 0; r < GRID_SIZE; r++) {
@@ -1498,7 +1500,6 @@ class MainScene extends Phaser.Scene {
       }
 
       // 8. 레벨업 판정 (한 단어로 여러 레벨을 넘을 수도 있으므로 while로 처리)
-      const levelBeforeUp = this.level;
       let leveledUp = false;
       while (this.level < LEVEL_CAP && this.score >= this.targetScore) {
         this.level++;
@@ -1509,9 +1510,9 @@ class MainScene extends Phaser.Scene {
       if (leveledUp) {
         this.levelText.setText(`LV: ${this.level}`);
         this.showLevelUpPopup(this.level);
-        if (Math.floor(this.level / 10) > Math.floor(levelBeforeUp / 10)) {
-          this.rebalanceLetterTiles();
-        }
+        this.rebalanceLetterTiles();
+        const addCount = burnTilesPerLevelUp(this.level);
+        for (let i = 0; i < addCount; i++) this.igniteRandomTile();
       }
       this.updateLevelProgressBar(480);
 
