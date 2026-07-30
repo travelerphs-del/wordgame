@@ -97,10 +97,17 @@ const BOMB_BONUS_SCORE = 500;
 
 // 불타는 타일: 이 길이 이하(=최소 길이)의 "나쁜 단어"를 만들면 새 불씨가 붙음
 const BURN_IGNITE_WORD_LENGTH = 3;
-// 불타는 타일 심각도 단계 수 (스프라이트 애니메이션 프레임셋 개수와 일치)
+// 불타는 타일 심각도 단계 수 (burn_stage_1~3 정적 베이스 이미지 개수와 일치)
 const MAX_BURN_SEVERITY = 3;
-// 심각도 단계별 애니메이션 프레임 수 (영상에서 균등 추출한 프레임 개수)
-const BURN_FRAMES_PER_STAGE = 6;
+// 불꽃 오버레이 애니메이션 프레임 수 (심각도 공용, 영상에서 균등 추출한 프레임 개수)
+const FLAME_FRAME_COUNT = 6;
+// 심각도별 불꽃 오버레이 크기/진하기 - 베이스 텍스처가 이미 "얼마나 탔는지"를 보여주므로
+// 불꽃은 심각도별로 새로 그리지 않고 하나를 재사용, 크기/알파만 단계적으로 키움
+const FLAME_OVERLAY_BY_SEVERITY = {
+  1: { scale: 0.55, alpha: 0.6 },
+  2: { scale: 0.8, alpha: 0.85 },
+  3: { scale: 1.05, alpha: 1 }
+};
 
 // 보너스타일: 해당 글자수 단어를 만들 때마다 매번 지급 (once-per-game 캡 없음)
 const BONUS_MILESTONES = [
@@ -251,12 +258,13 @@ class MainScene extends Phaser.Scene {
       this.load.image('bg_library_' + i, `assets/bg_library_${i}.png`);
     }
 
-    // 불타는 타일 애니메이션: 심각도 3단계 x 6프레임(영상에서 균등 추출). 아직 파일이
-    // 없어도(404) 게임이 죽지 않도록, 실제 등록/재생 시점에 textures.exists로 가드함 (create() 참고)
+    // 불타는 타일: 심각도별 정적 베이스 3장 + 공용 불꽃 오버레이 애니메이션 프레임. 아직
+    // 파일이 없어도(404) 게임이 죽지 않도록, 실제 사용 시점에 textures.exists로 가드함 (create() 참고)
     for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
-      for (let f = 1; f <= BURN_FRAMES_PER_STAGE; f++) {
-        this.load.image(`burn${stage}_f${f}`, `assets/burn_stage${stage}_${f}.png`);
-      }
+      this.load.image(`burn_stage_${stage}`, `assets/burn_stage_${stage}.png`);
+    }
+    for (let f = 1; f <= FLAME_FRAME_COUNT; f++) {
+      this.load.image(`flame_1_f${f}`, `assets/flame_1_f${f}.png`);
     }
 
     // 사운드 (V1과 같은 파일명 규칙이라 원한다면 같은 mp3를 그대로 복사해도 동작함)
@@ -376,17 +384,17 @@ class MainScene extends Phaser.Scene {
       this.sound.add('bgm_1', { volume: BGM_VOLUME, loop: true }).play();
     }
 
-    // 불타는 타일 애니메이션 등록 (6프레임/2fps = 3초 루프). 프레임 PNG가 아직 없으면(404로
-    // 로드 실패) 그 단계는 등록을 건너뜀 - igniteTile()/advanceBurningTiles()가 anims.exists로
+    // 불꽃 오버레이 애니메이션 등록 (심각도 공용, 6프레임/2fps = 3초 루프). 프레임 PNG가
+    // 아직 없으면(404) 등록을 건너뜀 - igniteTile()/applyBurnVisual()가 anims.exists로
     // 가드해서 애니메이션 대신 단순 틴트로 폴백함
-    for (let stage = 1; stage <= MAX_BURN_SEVERITY; stage++) {
-      const frames = Array.from({ length: BURN_FRAMES_PER_STAGE }, (_, i) => i + 1)
-        .map(f => `burn${stage}_f${f}`)
+    {
+      const flameFrames = Array.from({ length: FLAME_FRAME_COUNT }, (_, i) => i + 1)
+        .map(f => `flame_1_f${f}`)
         .filter(key => this.textures.exists(key) && this.textures.get(key).key !== '__MISSING');
-      if (frames.length > 0) {
+      if (flameFrames.length > 0) {
         this.anims.create({
-          key: 'burn_stage_' + stage,
-          frames: frames.map(key => ({ key })),
+          key: 'flame_overlay',
+          frames: flameFrames.map(key => ({ key })),
           frameRate: 2,
           repeat: -1
         });
@@ -607,6 +615,7 @@ class MainScene extends Phaser.Scene {
       for (let c = 0; c < GRID_SIZE; c++) {
         let tileObj = this.board[r][c];
         this.tweens.killTweensOf(tileObj.image);
+        this.tweens.killTweensOf(tileObj.fireOverlay);
         this.tweens.killTweensOf(tileObj.text);
 
         const x = this.boardStartX + c * this.tileSizeWithGap;
@@ -614,6 +623,7 @@ class MainScene extends Phaser.Scene {
         // 애니메이션 재생 중이었으면 stop()을 먼저 해야 setTexture가 다음 틱에 덮어써지지 않음
         tileObj.image.stop();
         tileObj.image.setPosition(x, y).setDisplaySize(tileObj.baseSize, tileObj.baseSize).setAlpha(1).clearTint().setTexture(this.tileKey);
+        tileObj.fireOverlay.stop().setVisible(false).setPosition(x, y).setDisplaySize(tileObj.baseSize, tileObj.baseSize).setAlpha(1);
         tileObj.text.setPosition(x, y).setScale(1).setAlpha(1);
 
         tileObj.type = 'normal';
@@ -651,12 +661,13 @@ class MainScene extends Phaser.Scene {
     if (popRemaining === 0) { this.isBoardBusy = false; return; }
 
     tiles.forEach(tile => {
-      this.tweens.killTweensOf(tile.image);
+      this.tweens.killTweensOf([tile.image, tile.fireOverlay]);
       this.tweens.add({
-        targets: [tile.image, tile.text],
+        targets: [tile.image, tile.fireOverlay, tile.text],
         scaleX: 0, scaleY: 0, alpha: 0, duration: 160, ease: 'Back.easeIn',
         onComplete: () => {
           tile.image.destroy();
+          tile.fireOverlay.destroy();
           tile.text.destroy();
           popRemaining--;
           if (popRemaining === 0) this.applyGravity(removedSet, forcedBonusType);
@@ -745,7 +756,7 @@ class MainScene extends Phaser.Scene {
     this.startFrictionSparks(tile, duration);
 
     this.tweens.add({
-      targets: [tile.image, tile.text],
+      targets: [tile.image, tile.fireOverlay, tile.text],
       y: targetY,
       duration,
       ease: 'Quad.easeIn',
@@ -757,6 +768,8 @@ class MainScene extends Phaser.Scene {
   }
 
   playLandingSettle(tile) {
+    // fireOverlay는 여기 안 넣음 - displaySizeY를 tile.baseSize로 강제하면 심각도별 스케일
+    // (FLAME_OVERLAY_BY_SEVERITY)이 깨짐. 착지 스쿼시는 베이스 이미지에만 적용
     this.tweens.killTweensOf(tile.image);
     tile.image.setDisplaySize(tile.baseSize, tile.baseSize);
     this.tweens.add({
@@ -816,18 +829,29 @@ class MainScene extends Phaser.Scene {
     this.playSfx('sfx_fire_crackle');
   }
 
+  // 심각도에 맞는 "탄 책" 베이스 텍스처로 교체 + 공용 불꽃 오버레이를 심각도별 크기/진하기로 표시.
+  // 베이스 그림 자체가 타는 정도를 보여주므로 불꽃은 하나만 재사용(설계는 계획 파일 참고)
   applyBurnVisual(tile) {
-    const animKey = 'burn_stage_' + tile.burnSeverity;
-    if (this.anims.exists(animKey)) {
-      this.tweens.killTweensOf(tile.image);
-      tile.image.clearTint().setAlpha(1);
-      tile.image.play(animKey);
+    this.tweens.killTweensOf(tile.image);
+    const baseKey = 'burn_stage_' + tile.burnSeverity;
+    if (this.textures.exists(baseKey) && this.textures.get(baseKey).key !== '__MISSING') {
+      tile.image.clearTint().setAlpha(1).setTexture(baseKey);
     } else {
-      // 폴백: 프레임 에셋 도착 전까지 심각도별 단색 틴트 + 깜빡임
-      this.tweens.killTweensOf(tile.image);
+      // 베이스 이미지가 아직 없으면 원래 타입 텍스처에 심각도별 단색 틴트+깜빡임으로 폴백
       const tints = [0xffd700, 0xff8c00, 0xff2200];
       tile.image.setTint(tints[tile.burnSeverity - 1] || tints[tints.length - 1]);
       this.tweens.add({ targets: tile.image, alpha: 0.55, duration: 300, yoyo: true, repeat: -1 });
+    }
+
+    const cfg = FLAME_OVERLAY_BY_SEVERITY[tile.burnSeverity] || FLAME_OVERLAY_BY_SEVERITY[MAX_BURN_SEVERITY];
+    if (this.anims.exists('flame_overlay')) {
+      tile.fireOverlay
+        .setVisible(true)
+        .setAlpha(cfg.alpha)
+        .setDisplaySize(tile.baseSize * cfg.scale, tile.baseSize * cfg.scale)
+        .play('flame_overlay');
+    } else {
+      tile.fireOverlay.setVisible(false);
     }
   }
 
@@ -836,8 +860,8 @@ class MainScene extends Phaser.Scene {
     tile.burnSeverity = 0;
     this.burningTiles = this.burningTiles.filter(t => t !== tile);
     this.tweens.killTweensOf(tile.image);
-    tile.image.stop();
-    tile.image.setTexture(TILE_TEXTURE[tile.type] || this.tileKey).clearTint().setAlpha(1);
+    tile.image.clearTint().setAlpha(1).setTexture(TILE_TEXTURE[tile.type] || this.tileKey);
+    tile.fireOverlay.stop().setVisible(false);
     this.playSfx('sfx_extinguish');
   }
 
@@ -953,15 +977,24 @@ class MainScene extends Phaser.Scene {
     const textureKey = (this.textures.exists(TILE_TEXTURE[type]) && this.textures.get(TILE_TEXTURE[type]).key !== '__MISSING')
                         ? TILE_TEXTURE[type] : this.tileKey;
 
-    // Sprite로 생성(Image의 상위호환) — 평소엔 정적 텍스처 한 장을 보여주다가, 불이 붙으면
-    // 같은 오브젝트에 .play()만 호출해서 애니메이션으로 전환함 (destroy/재생성 없음)
+    // Sprite로 생성(Image의 상위호환) — 불이 붙으면 이 텍스처 자체를 burn_stage_N으로 교체함
     let tileImage = this.add.sprite(x, y, textureKey).setDisplaySize(this.tileDisplaySize, this.tileDisplaySize).setInteractive();
+
+    // 불꽃 오버레이: tileImage 바로 위, 글자(tileText)보다는 아래에 놓여서 타는 동안에도
+    // 글자는 계속 읽힘. 평소엔 안 보이다가 igniteTile()/applyBurnVisual()에서 켜짐
+    const flameKey = (this.textures.exists('flame_1_f1') && this.textures.get('flame_1_f1').key !== '__MISSING')
+                      ? 'flame_1_f1' : this.tileKey;
+    let fireOverlay = this.add.sprite(x, y, flameKey)
+      .setDisplaySize(this.tileDisplaySize, this.tileDisplaySize)
+      .setVisible(false)
+      .setBlendMode(Phaser.BlendModes.ADD);
+
     let tileText = this.add.text(x, y, finalLetter, {
       font: 'bold 28px sans-serif', fill: '#ffcc00', stroke: '#000000', strokeThickness: 5
     }).setOrigin(0.5);
 
     let tileObj = {
-      r, c, letter: finalLetter, image: tileImage, text: tileText, type,
+      r, c, letter: finalLetter, image: tileImage, fireOverlay, text: tileText, type,
       baseSize: this.tileDisplaySize, burning: false, burnSeverity: 0
     };
 
@@ -1018,9 +1051,9 @@ class MainScene extends Phaser.Scene {
 
     // V2는 선택 불가 타일이 없음 (불타는 타일도 선택 가능해야 꺼서 살릴 수 있음)
     this.playSfx('sfx_tile_select_' + (1 + Math.floor(Math.random() * 3)));
-    this.tweens.killTweensOf([tile.image, tile.text]);
+    this.tweens.killTweensOf([tile.image, tile.fireOverlay, tile.text]);
     this.tweens.add({
-      targets: [tile.image, tile.text], y: '-=10', duration: 90, ease: 'Sine.easeOut', yoyo: true
+      targets: [tile.image, tile.fireOverlay, tile.text], y: '-=10', duration: 90, ease: 'Sine.easeOut', yoyo: true
     });
 
     const index = this.selectedPath.indexOf(tile);
